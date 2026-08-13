@@ -35,30 +35,7 @@ struct TaskbarRootView: View {
                 .fill(TaskbarTheme.hairline)
                 .frame(width: 1, height: size.dividerHeight)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    ForEach(viewModel.items) { item in
-                        TaskbarAppButton(item: item) {
-                            viewModel.select(item)
-                        } pinAction: {
-                            if item.isPinned {
-                                viewModel.unpin(item)
-                            } else {
-                                viewModel.pin(item)
-                            }
-                        } quitAction: {
-                            viewModel.quit(item)
-                        }
-                        .transition(
-                            .asymmetric(
-                                insertion: .scale(scale: 0.55).combined(with: .opacity),
-                                removal: .scale(scale: 0.55).combined(with: .opacity)
-                            )
-                        )
-                    }
-                }
-                .animation(TaskbarMotion.list, value: viewModel.items.map(\.id))
-            }
+            TaskbarAppStrip(viewModel: viewModel)
 
             Spacer(minLength: 6)
 
@@ -82,6 +59,91 @@ struct TaskbarRootView: View {
                 .fill(TaskbarTheme.hairline)
                 .frame(height: 0.5)
         }
+    }
+}
+
+private struct AppStripWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct AppStripViewportKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+struct TaskbarAppStrip: View {
+    @ObservedObject var viewModel: TaskbarViewModel
+    @GestureState private var dragTranslation: CGFloat = 0
+    @State private var baseOffset: CGFloat = 0
+    @State private var contentWidth: CGFloat = 0
+    @State private var viewportWidth: CGFloat = 0
+
+    private var overflow: CGFloat { max(0, contentWidth - viewportWidth) }
+    private var offset: CGFloat {
+        min(0, max(-overflow, baseOffset + dragTranslation))
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(viewModel.items) { item in
+                TaskbarAppButton(item: item) {
+                    viewModel.select(item)
+                } pinAction: {
+                    if item.isPinned {
+                        viewModel.unpin(item)
+                    } else {
+                        viewModel.pin(item)
+                    }
+                } quitAction: {
+                    viewModel.quit(item)
+                }
+                .transition(
+                    .asymmetric(
+                        insertion: .scale(scale: 0.55).combined(with: .opacity),
+                        removal: .scale(scale: 0.55).combined(with: .opacity)
+                    )
+                )
+            }
+        }
+        .animation(TaskbarMotion.list, value: viewModel.items.map(\.id))
+        .fixedSize(horizontal: true, vertical: false)
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: AppStripWidthKey.self, value: geo.size.width)
+            }
+        )
+        .offset(x: offset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: AppStripViewportKey.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(AppStripWidthKey.self) { contentWidth = $0 }
+        .onPreferenceChange(AppStripViewportKey.self) { viewportWidth = $0 }
+        .onChange(of: viewModel.items.map(\.id)) { _ in clampOffset() }
+        .onChange(of: overflow) { _ in clampOffset() }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 16)
+                .updating($dragTranslation) { value, state, _ in
+                    guard overflow > 0 else { return }
+                    state = value.translation.width
+                }
+                .onEnded { value in
+                    guard overflow > 0 else { return }
+                    baseOffset = min(0, max(-overflow, baseOffset + value.translation.width))
+                }
+        )
+    }
+
+    private func clampOffset() {
+        baseOffset = min(0, max(-overflow, baseOffset))
     }
 }
 
@@ -174,6 +236,7 @@ struct TaskbarAppButton: View {
                 RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                     .fill(item.isActive || hovering ? TaskbarTheme.activeFill : Color.clear)
             )
+            .contentShape(RoundedRectangle(cornerRadius: size.corner, style: .continuous))
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
         .onHover { hovering in

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Combine
 import CoreGraphics
 import Foundation
@@ -130,34 +131,36 @@ final class AppMonitor: ObservableObject {
     }
 
     func activateOrLaunch(item: TaskbarAppItem) {
-        if item.isRunning, let pid = item.processIdentifier,
-           let running = NSRunningApplication(processIdentifier: pid) {
-            if item.isActive {
+        if let running = resolvedRunning(for: item) {
+            if item.isActive || running.isActive {
                 running.hide()
-            } else {
-                running.unhide()
-                running.activate(options: [.activateIgnoringOtherApps])
+                return
             }
-            return
-        }
-
-        if let running = runningApps.first(where: { $0.bundleIdentifier == item.bundleIdentifier }) {
-            if running.isActive {
-                running.hide()
-            } else {
-                running.unhide()
-                running.activate(options: [.activateIgnoringOtherApps])
-            }
+            AppActivation.bringToFront(running)
             return
         }
 
         guard let url = item.url ?? AppIconCache.url(forBundleID: item.bundleIdentifier) else {
+            AppLog.warn("找不到 \(item.name) 的路径", category: "apps")
             return
         }
+        AppActivation.open(url: url)
+    }
 
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
-        NSWorkspace.shared.openApplication(at: url, configuration: config)
+    private func resolvedRunning(for item: TaskbarAppItem) -> NSRunningApplication? {
+        if item.isRunning, let pid = item.processIdentifier,
+           let running = NSRunningApplication(processIdentifier: pid),
+           !running.isTerminated {
+            return running
+        }
+        if let running = runningApps.first(where: {
+            $0.bundleIdentifier == item.bundleIdentifier && !$0.isTerminated
+        }) {
+            return running
+        }
+        return NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == item.bundleIdentifier && !$0.isTerminated
+        }
     }
 
     func quit(bundleIdentifier: String) {
@@ -170,5 +173,98 @@ final class AppMonitor: ObservableObject {
         runningApps
             .filter { $0.bundleIdentifier == bundleIdentifier }
             .forEach { $0.forceTerminate() }
+    }
+}
+
+enum AppActivation {
+    static func bringToFront(_ running: NSRunningApplication, allowOpenFallback: Bool = true) {
+        guard !running.isTerminated else { return }
+        running.unhide()
+
+        if #available(macOS 14.0, *) {
+            NSApp.yieldActivation(to: running)
+            _ = running.activate()
+        }
+        running.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+        raiseWindows(of: running)
+
+        if isAgentApp(running), let url = customActivationURL(for: running) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        if running.isActive {
+            return
+        }
+
+        guard allowOpenFallback, let url = running.bundleURL else { return }
+        open(url: url)
+    }
+
+    static func open(url: URL) {
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { running, error in
+            if let error {
+                AppLog.warn("打开失败 \(url.lastPathComponent): \(error.localizedDescription)", category: "apps")
+                return
+            }
+            guard let running else { return }
+            Task { @MainActor in
+                bringToFront(running, allowOpenFallback: false)
+            }
+        }
+    }
+
+    private static func raiseWindows(of running: NSRunningApplication) {
+        let app = AXUIElementCreateApplication(running.processIdentifier)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement]
+        else { return }
+
+        for window in windows {
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+    }
+
+    private static func isAgentApp(_ running: NSRunningApplication) -> Bool {
+        if running.activationPolicy != .regular { return true }
+        guard let url = running.bundleURL, let bundle = Bundle(url: url) else { return false }
+        if let flag = bundle.object(forInfoDictionaryKey: "LSUIElement") as? NSNumber {
+            return flag.boolValue
+        }
+        if let flag = bundle.object(forInfoDictionaryKey: "LSUIElement") as? String {
+            return flag == "1" || flag.lowercased() == "true"
+        }
+        return false
+    }
+
+    private static func customActivationURL(for running: NSRunningApplication) -> URL? {
+        guard let bundleURL = running.bundleURL,
+              let bundle = Bundle(url: bundleURL),
+              let types = bundle.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]]
+        else { return nil }
+
+        let blocked: Set<String> = ["http", "https", "file", "mailto", "ftp", "tel", "sms"]
+        let schemes = types
+            .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
+            .map { $0.lowercased() }
+            .filter { !blocked.contains($0) && !$0.isEmpty }
+        guard !schemes.isEmpty else { return nil }
+
+        let tokens = Set((running.bundleIdentifier ?? "").lowercased().split(separator: ".").map(String.init))
+        let scheme = schemes.max { a, b in
+            score(scheme: a, tokens: tokens) < score(scheme: b, tokens: tokens)
+        } ?? schemes[0]
+        return URL(string: "\(scheme):")
+    }
+
+    private static func score(scheme: String, tokens: Set<String>) -> Int {
+        if tokens.contains(scheme) { return 3 }
+        if tokens.contains(where: { $0.contains(scheme) || scheme.contains($0) }) { return 2 }
+        return 1
     }
 }

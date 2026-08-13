@@ -110,9 +110,13 @@ final class StartMenuCatalog: ObservableObject {
     }
 
     func launch(_ app: StartMenuApp) {
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
-        NSWorkspace.shared.openApplication(at: app.url, configuration: config)
+        if let running = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == app.bundleIdentifier && !$0.isTerminated
+        }) {
+            AppActivation.bringToFront(running)
+            return
+        }
+        AppActivation.open(url: app.url)
     }
 
     func openCategory(_ category: AppCategory) {
