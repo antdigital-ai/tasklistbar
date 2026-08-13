@@ -33,3 +33,17 @@ codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
 
 echo "✓ Done: $APP_BUNDLE"
 echo "  Run: open \"$APP_BUNDLE\""
+
+if [[ "$CONFIG" == "release" ]]; then
+  STAGE="$ROOT/dist/.dmg-stage"
+  DMG="$ROOT/dist/${APP_NAME}.dmg"
+  echo "→ Packaging ${DMG}"
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE"
+  ditto "$APP_BUNDLE" "$STAGE/${APP_NAME}.app"
+  ln -s /Applications "$STAGE/Applications"
+  rm -f "$DMG"
+  hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+  rm -rf "$STAGE"
+  echo "✓ DMG: $DMG"
+fi

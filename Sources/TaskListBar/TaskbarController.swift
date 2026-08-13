@@ -51,6 +51,7 @@ final class TaskbarController: NSObject {
         observeClicksOutside()
         observeHotkeys()
         observeWindowAvoidance()
+        observeBarSize()
         viewModel.startTrayMonitors()
         prewarmStartMenu()
 
@@ -155,6 +156,20 @@ final class TaskbarController: NSObject {
         let themeItem = statusItem("主题", symbol: "circle.lefthalf.filled", action: nil)
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
+
+        let sizeMenu = NSMenu()
+        for size in TaskbarSize.allCases {
+            let sizeOption = statusItem(
+                "\(size.title)（\(Int(size.barHeight))pt）",
+                symbol: "rectangle.bottomhalf.inset.filled",
+                action: #selector(statusSetBarSize(_:))
+            )
+            sizeOption.representedObject = size.rawValue
+            sizeMenu.addItem(sizeOption)
+        }
+        let sizeItem = statusItem("任务栏大小", symbol: "arrow.up.left.and.arrow.down.right", action: nil)
+        sizeItem.submenu = sizeMenu
+        menu.addItem(sizeItem)
         menu.addItem(.separator())
         menu.addItem(statusItem("刷新开始菜单缓存", symbol: "arrow.clockwise", action: #selector(statusRefreshStartMenu)))
         menu.addItem(statusItem("显示任务栏", symbol: "rectangle.bottomhalf.inset.filled", action: #selector(statusShowTaskbar)))
@@ -205,6 +220,13 @@ final class TaskbarController: NSObject {
         viewModel.appSettings.setAppearance(appearance)
     }
 
+    @objc private func statusSetBarSize(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let size = TaskbarSize(rawValue: raw)
+        else { return }
+        viewModel.appSettings.setBarSize(size)
+    }
+
     @objc private func statusRefreshStartMenu() {
         viewModel.startMenuCatalog.refresh(force: true)
     }
@@ -252,10 +274,7 @@ final class TaskbarController: NSObject {
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
         panel.isRestorable = false
-        panel.minSize = NSSize(width: 0, height: TaskbarMetrics.barHeight)
-        panel.maxSize = NSSize(width: 10_000, height: TaskbarMetrics.barHeight)
-        panel.contentMinSize = NSSize(width: 0, height: TaskbarMetrics.barHeight)
-        panel.contentMaxSize = NSSize(width: 10_000, height: TaskbarMetrics.barHeight)
+        applyBarHeightConstraints(to: panel)
         panel.contentView = glass
         panel.ignoresMouseEvents = false
         panel.acceptsMouseMovedEvents = true
@@ -398,53 +417,59 @@ final class TaskbarController: NSObject {
 
     private func layoutPanels() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
-        let frame = screen.frame
-        let visible = screen.visibleFrame
+        panel?.setFrame(taskbarFrame(on: screen), display: true)
+        panel?.orderFrontRegardless()
+        layoutOverlays(on: screen, animated: false)
+    }
 
-        let barFrame = NSRect(
-            x: frame.minX,
-            y: frame.minY,
-            width: frame.width,
+    private func taskbarFrame(on screen: NSScreen) -> NSRect {
+        NSRect(
+            x: screen.frame.minX,
+            y: screen.frame.minY,
+            width: screen.frame.width,
             height: Self.barHeight
         )
+    }
 
-        panel?.setFrame(barFrame, display: true)
-        panel?.orderFrontRegardless()
+    private func layoutOverlays(on screen: NSScreen, animated: Bool) {
+        let frame = screen.frame
+        let visible = screen.visibleFrame
+        let bar = Self.barHeight
+        let apply: (NSPanel, NSRect) -> Void = { panel, rect in
+            if animated {
+                panel.animator().setFrame(rect, display: true)
+            } else {
+                panel.setFrame(rect, display: true)
+            }
+        }
 
         if let start = startMenuPanel {
-            let menuWidth: CGFloat = 420
-            let menuHeight: CGFloat = min(560, max(360, visible.height - 80))
-            let menuFrame = NSRect(
+            let menuHeight = min(560, max(360, visible.height - 80))
+            apply(start, NSRect(
                 x: frame.minX + 8,
-                y: frame.minY + Self.barHeight + 8,
-                width: menuWidth,
+                y: frame.minY + bar + 8,
+                width: 420,
                 height: menuHeight
-            )
-            start.setFrame(menuFrame, display: true)
+            ))
         }
-
         if let modifiers = modifierKeysPanel {
-            let menuFrame = NSRect(
+            apply(modifiers, NSRect(
                 x: frame.minX + 8,
-                y: frame.minY + Self.barHeight + 8,
+                y: frame.minY + bar + 8,
                 width: 420,
                 height: 420
-            )
-            modifiers.setFrame(menuFrame, display: true)
+            ))
         }
-
         if let calendar = calendarPanel {
-            calendar.setFrame(calendarTargetFrame(), display: true)
+            apply(calendar, calendarTargetFrame())
         }
-
         if let settings = settingsPanel {
-            let menuFrame = NSRect(
+            apply(settings, NSRect(
                 x: frame.minX + 8,
-                y: frame.minY + Self.barHeight + 8,
+                y: frame.minY + bar + 8,
                 width: 420,
-                height: 500
-            )
-            settings.setFrame(menuFrame, display: true)
+                height: 580
+            ))
         }
     }
 
@@ -862,6 +887,65 @@ final class TaskbarController: NSObject {
             .store(in: &cancellables)
     }
 
+    private func observeBarSize() {
+        viewModel.appSettings.$barSize
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.animateBarSize()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func animateBarSize() {
+        guard let panel,
+              let screen = NSScreen.main ?? NSScreen.screens.first
+        else {
+            layoutPanels()
+            return
+        }
+
+        let targetHeight = TaskbarMetrics.barHeight
+        let currentHeight = panel.frame.height
+        let low = min(currentHeight, targetHeight)
+        let high = max(currentHeight, targetHeight)
+        panel.minSize = NSSize(width: 0, height: low)
+        panel.maxSize = NSSize(width: 10_000, height: high)
+        panel.contentMinSize = NSSize(width: 0, height: low)
+        panel.contentMaxSize = NSSize(width: 10_000, height: high)
+
+        if let taskbar = panel as? TaskbarPanel {
+            taskbar.locksHeight = false
+        }
+
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = TaskbarMotion.Panel.resizeDuration
+            context.timingFunction = TaskbarMotion.Panel.resizeTiming
+            context.allowsImplicitAnimation = true
+            panel.animator().setFrame(taskbarFrame(on: screen), display: true)
+            layoutOverlays(on: screen, animated: true)
+        }, completionHandler: { [weak self] in
+            Task { @MainActor in
+                guard let self, let panel = self.panel else { return }
+                if let taskbar = panel as? TaskbarPanel {
+                    taskbar.locksHeight = true
+                }
+                self.applyBarHeightConstraints(to: panel)
+                if self.viewModel.appSettings.avoidOverlappingWindows {
+                    self.windowAvoider.setEnabled(true)
+                }
+            }
+        })
+    }
+
+    private func applyBarHeightConstraints(to panel: NSPanel) {
+        let height = TaskbarMetrics.barHeight
+        panel.minSize = NSSize(width: 0, height: height)
+        panel.maxSize = NSSize(width: 10_000, height: height)
+        panel.contentMinSize = NSSize(width: 0, height: height)
+        panel.contentMaxSize = NSSize(width: 10_000, height: height)
+    }
+
     private func handleHotkey(_ action: HotkeyCenter.Action) {
         switch action {
         case .startMenu:
@@ -1004,10 +1088,13 @@ final class KeyablePanel: NSPanel {
 final class TaskbarPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+    var locksHeight = true
 
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         var rect = frameRect
-        rect.size.height = TaskbarMetrics.barHeight
+        if locksHeight {
+            rect.size.height = TaskbarMetrics.barHeight
+        }
         if let screen = screen ?? self.screen {
             rect.origin.y = screen.frame.minY
         }
@@ -1024,7 +1111,9 @@ final class TaskbarPanel: NSPanel {
 
     private func lockedFrame(_ frameRect: NSRect) -> NSRect {
         var rect = frameRect
-        rect.size.height = TaskbarMetrics.barHeight
+        if locksHeight {
+            rect.size.height = TaskbarMetrics.barHeight
+        }
         if let screen {
             rect.origin.y = screen.frame.minY
         }
@@ -1044,6 +1133,12 @@ extension TaskbarController: NSMenuDelegate {
             for item in themeItem.submenu?.items ?? [] {
                 let raw = item.representedObject as? String
                 item.state = raw == viewModel.appSettings.appearance.rawValue ? .on : .off
+            }
+        }
+        if let sizeItem = menu.items.first(where: { $0.submenu != nil && $0.title == "任务栏大小" }) {
+            for item in sizeItem.submenu?.items ?? [] {
+                let raw = item.representedObject as? String
+                item.state = raw == viewModel.appSettings.barSize.rawValue ? .on : .off
             }
         }
     }

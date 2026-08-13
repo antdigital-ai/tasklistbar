@@ -13,6 +13,7 @@ enum TaskbarMotion {
     static let press = fluid(0.12)
     static let indicator = fluid(0.22)
     static let list = fluid(0.30)
+    static let sizeChange = fluid(0.34)
 
     private static func fluid(_ duration: TimeInterval) -> Animation {
         .timingCurve(0.22, 1.0, 0.36, 1.0, duration: duration)

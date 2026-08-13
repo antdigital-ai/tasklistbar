@@ -26,7 +26,7 @@ struct AppSettingsView: View {
                 Text("设置")
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(.primary)
-                Text("开机启动、快捷键、外观与系统 Dock。")
+                Text("开机启动、快捷键、外观、大小与系统 Dock。")
                     .font(.system(size: 12))
                     .foregroundStyle(.primary.opacity(0.55))
             }
@@ -49,6 +49,7 @@ struct AppSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
             appearancePicker
+            sizePicker
             accentPicker
 
             VStack(spacing: 0) {
@@ -257,6 +258,38 @@ struct AppSettingsView: View {
                     }
                     .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
                     .help(appearance.subtitle)
+                }
+            }
+        }
+    }
+
+    private var sizePicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("任务栏大小")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.55))
+            HStack(spacing: 8) {
+                ForEach(TaskbarSize.allCases) { size in
+                    Button {
+                        settings.setBarSize(size)
+                    } label: {
+                        VStack(spacing: 6) {
+                            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                .fill(settings.barSize == size ? settings.accent.onAccent.opacity(0.92) : Color.primary.opacity(0.35))
+                                .frame(width: 22, height: size.previewBarHeight)
+                            Text(size.title)
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(settings.barSize == size ? settings.accent.onAccent : .primary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(settings.barSize == size ? settings.accent.color.opacity(0.9) : Color.primary.opacity(0.06))
+                        )
+                    }
+                    .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
+                    .help(size.subtitle)
                 }
             }
         }

@@ -2,12 +2,15 @@ import AppKit
 import SwiftUI
 
 enum TaskbarMetrics {
-    static let barHeight: CGFloat = 36
-    static let iconSize: CGFloat = 20
-    static let appButtonWidth: CGFloat = 32
-    static let trayHit: CGFloat = 22
-    static let indicatorHeight: CGFloat = 2
-    static let corner: CGFloat = 8
+    static var size: TaskbarSize = .regular
+
+    static var barHeight: CGFloat { size.barHeight }
+    static var iconSize: CGFloat { size.iconSize }
+    static var appButtonWidth: CGFloat { size.appButtonWidth }
+    static var appButtonHeight: CGFloat { size.appButtonHeight }
+    static var trayHit: CGFloat { size.trayHit }
+    static var indicatorHeight: CGFloat { size.indicatorHeight }
+    static var corner: CGFloat { size.corner }
 }
 
 struct TaskbarTheme {
@@ -20,6 +23,7 @@ struct TaskbarTheme {
 
 struct TaskbarRootView: View {
     @ObservedObject var viewModel: TaskbarViewModel
+    @Environment(\.taskbarSize) private var size
 
     var body: some View {
         HStack(spacing: 4) {
@@ -29,7 +33,7 @@ struct TaskbarRootView: View {
 
             Rectangle()
                 .fill(TaskbarTheme.hairline)
-                .frame(width: 1, height: 18)
+                .frame(width: 1, height: size.dividerHeight)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 2) {
@@ -70,7 +74,8 @@ struct TaskbarRootView: View {
         }
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .frame(height: TaskbarMetrics.barHeight)
+        .frame(height: size.barHeight)
+        .animation(TaskbarMotion.sizeChange, value: size)
         .modifier(TaskbarPointerLock())
         .overlay(alignment: .top) {
             Rectangle()
@@ -84,9 +89,8 @@ struct StartButton: View {
     let isOpen: Bool
     let action: () -> Void
     @Environment(\.taskbarAccent) private var accent
+    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
-
-    private let avatarSize: CGFloat = 22
 
     var body: some View {
         Button(action: action) {
@@ -95,14 +99,14 @@ struct StartButton: View {
                     .scaleEffect(hovering || isOpen ? 1.08 : 1.0)
                 Capsule()
                     .fill(isOpen ? accent.color : Color.clear)
-                    .frame(width: isOpen ? 14 : 0, height: TaskbarMetrics.indicatorHeight)
+                    .frame(width: isOpen ? size.indicatorActiveWidth : 0, height: size.indicatorHeight)
             }
-            .frame(width: TaskbarMetrics.appButtonWidth, height: 28)
+            .frame(width: size.appButtonWidth, height: size.appButtonHeight)
             .background(
-                RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
+                RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                     .fill(isOpen || hovering ? TaskbarTheme.activeFill : Color.clear)
             )
-            .contentShape(RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: size.corner, style: .continuous))
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
         .onHover { hovering in
@@ -120,15 +124,15 @@ struct StartButton: View {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
-                    .frame(width: avatarSize, height: avatarSize)
+                    .frame(width: size.avatarSize, height: size.avatarSize)
             } else {
                 ZStack {
                     Circle().fill(accent.color.opacity(0.92))
                     Text(CurrentUserProfile.initials)
-                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .font(.system(size: size.avatarInitials, weight: .semibold, design: .rounded))
                         .foregroundStyle(accent.onAccent)
                 }
-                .frame(width: avatarSize, height: avatarSize)
+                .frame(width: size.avatarSize, height: size.avatarSize)
             }
         }
         .clipShape(Circle())
@@ -145,6 +149,7 @@ struct TaskbarAppButton: View {
     let quitAction: () -> Void
 
     @Environment(\.taskbarAccent) private var accent
+    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
     var body: some View {
@@ -153,17 +158,20 @@ struct TaskbarAppButton: View {
                 Image(nsImage: item.icon)
                     .resizable()
                     .interpolation(.high)
-                    .frame(width: TaskbarMetrics.iconSize, height: TaskbarMetrics.iconSize)
+                    .frame(width: size.iconSize, height: size.iconSize)
                     .scaleEffect(hovering ? 1.12 : 1.0)
                 Capsule()
                     .fill(item.isRunning ? (item.isActive ? accent.color : Color.primary.opacity(0.45)) : Color.clear)
-                    .frame(width: item.isActive ? 14 : (item.isRunning ? 6 : 0), height: TaskbarMetrics.indicatorHeight)
+                    .frame(
+                        width: item.isActive ? size.indicatorActiveWidth : (item.isRunning ? size.indicatorRunningWidth : 0),
+                        height: size.indicatorHeight
+                    )
                     .animation(TaskbarMotion.indicator, value: item.isActive)
                     .animation(TaskbarMotion.indicator, value: item.isRunning)
             }
-            .frame(width: TaskbarMetrics.appButtonWidth, height: 28)
+            .frame(width: size.appButtonWidth, height: size.appButtonHeight)
             .background(
-                RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
+                RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                     .fill(item.isActive || hovering ? TaskbarTheme.activeFill : Color.clear)
             )
         }

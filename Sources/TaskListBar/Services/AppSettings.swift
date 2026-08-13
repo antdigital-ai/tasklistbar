@@ -7,6 +7,7 @@ enum AppSettingKey {
     static let hideSystemDock = "hideSystemDock"
     static let appearance = "appAppearance"
     static let accent = "appAccent"
+    static let barSize = "taskbarSize"
     static let startMenuHotkey = "startMenuHotkey"
     static let calendarHotkey = "calendarHotkey"
     static let avoidOverlappingWindows = "avoidOverlappingWindows"
@@ -19,6 +20,7 @@ final class AppSettings: ObservableObject {
     @Published private(set) var hideDock: Bool
     @Published private(set) var appearance: AppAppearance
     @Published private(set) var accent: AppAccent
+    @Published private(set) var barSize: TaskbarSize
     @Published private(set) var startMenuHotkey: HotkeyChord?
     @Published private(set) var calendarHotkey: HotkeyChord?
     @Published private(set) var avoidOverlappingWindows: Bool
@@ -32,6 +34,7 @@ final class AppSettings: ObservableObject {
         hideDock = defaults.bool(forKey: AppSettingKey.hideSystemDock)
         appearance = AppAppearance(rawValue: defaults.string(forKey: AppSettingKey.appearance) ?? "") ?? .system
         accent = AppAccent(rawValue: defaults.string(forKey: AppSettingKey.accent) ?? "") ?? .blue
+        barSize = TaskbarSize(rawValue: defaults.string(forKey: AppSettingKey.barSize) ?? "") ?? .regular
         startMenuHotkey = Self.loadHotkey(key: AppSettingKey.startMenuHotkey, fallback: .startMenuDefault)
         calendarHotkey = Self.loadHotkey(key: AppSettingKey.calendarHotkey, fallback: .calendarDefault)
         if defaults.object(forKey: AppSettingKey.avoidOverlappingWindows) == nil {
@@ -45,9 +48,11 @@ final class AppSettings: ObservableObject {
             calendarExpanded = defaults.bool(forKey: AppSettingKey.calendarExpanded)
         }
         defaults.set(launchAtLogin, forKey: AppSettingKey.launchAtLogin)
+        TaskbarMetrics.size = barSize
     }
 
     func applyOnLaunch() {
+        TaskbarMetrics.size = barSize
         applyAppearance()
         if hideDock {
             DockHider.hide()
@@ -66,6 +71,12 @@ final class AppSettings: ObservableObject {
     func setAccent(_ accent: AppAccent) {
         self.accent = accent
         UserDefaults.standard.set(accent.rawValue, forKey: AppSettingKey.accent)
+    }
+
+    func setBarSize(_ size: TaskbarSize) {
+        barSize = size
+        TaskbarMetrics.size = size
+        UserDefaults.standard.set(size.rawValue, forKey: AppSettingKey.barSize)
     }
 
     func applyAppearance() {

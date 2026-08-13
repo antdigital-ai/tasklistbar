@@ -1,6 +1,168 @@
 import AppKit
 import SwiftUI
 
+enum TaskbarSize: String, CaseIterable, Identifiable {
+    case compact
+    case regular
+    case large
+    case extraLarge
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .compact: return "小"
+        case .regular: return "中"
+        case .large: return "大"
+        case .extraLarge: return "特大"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .compact: return "28pt 底栏"
+        case .regular: return "36pt 底栏"
+        case .large: return "48pt 底栏"
+        case .extraLarge: return "64pt 底栏"
+        }
+    }
+
+    var barHeight: CGFloat {
+        switch self {
+        case .compact: return 28
+        case .regular: return 36
+        case .large: return 48
+        case .extraLarge: return 64
+        }
+    }
+
+    var iconSize: CGFloat {
+        switch self {
+        case .compact: return 16
+        case .regular: return 20
+        case .large: return 28
+        case .extraLarge: return 40
+        }
+    }
+
+    var appButtonWidth: CGFloat {
+        switch self {
+        case .compact: return 26
+        case .regular: return 32
+        case .large: return 42
+        case .extraLarge: return 56
+        }
+    }
+
+    var appButtonHeight: CGFloat {
+        switch self {
+        case .compact: return 22
+        case .regular: return 28
+        case .large: return 40
+        case .extraLarge: return 54
+        }
+    }
+
+    var avatarSize: CGFloat {
+        switch self {
+        case .compact: return 16
+        case .regular: return 22
+        case .large: return 30
+        case .extraLarge: return 40
+        }
+    }
+
+    var trayHit: CGFloat {
+        switch self {
+        case .compact: return 18
+        case .regular: return 22
+        case .large: return 30
+        case .extraLarge: return 40
+        }
+    }
+
+    var traySymbol: CGFloat {
+        switch self {
+        case .compact: return 10
+        case .regular: return 12
+        case .large: return 14
+        case .extraLarge: return 17
+        }
+    }
+
+    var trayFont: CGFloat {
+        switch self {
+        case .compact: return 10
+        case .regular: return 11
+        case .large: return 12
+        case .extraLarge: return 14
+        }
+    }
+
+    var indicatorHeight: CGFloat {
+        switch self {
+        case .compact: return 2
+        case .regular: return 2
+        case .large: return 2.5
+        case .extraLarge: return 3
+        }
+    }
+
+    var indicatorActiveWidth: CGFloat {
+        switch self {
+        case .compact: return 11
+        case .regular: return 14
+        case .large: return 16
+        case .extraLarge: return 20
+        }
+    }
+
+    var indicatorRunningWidth: CGFloat {
+        switch self {
+        case .compact: return 5
+        case .regular: return 6
+        case .large: return 7
+        case .extraLarge: return 8
+        }
+    }
+
+    var corner: CGFloat {
+        switch self {
+        case .compact: return 6
+        case .regular: return 8
+        case .large: return 10
+        case .extraLarge: return 12
+        }
+    }
+
+    var dividerHeight: CGFloat {
+        switch self {
+        case .compact: return 14
+        case .regular: return 18
+        case .large: return 24
+        case .extraLarge: return 32
+        }
+    }
+
+    var avatarInitials: CGFloat {
+        switch self {
+        case .compact: return 8
+        case .regular: return 9
+        case .large: return 11
+        case .extraLarge: return 14
+        }
+    }
+
+    var previewBarHeight: CGFloat {
+        switch self {
+        case .compact: return 5
+        case .regular: return 8
+        case .large: return 12
+        case .extraLarge: return 16
+        }
+    }
+}
+
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system
     case light
@@ -89,10 +251,19 @@ private struct TaskbarAccentKey: EnvironmentKey {
     static let defaultValue = AppAccent.blue
 }
 
+private struct TaskbarSizeKey: EnvironmentKey {
+    static let defaultValue = TaskbarSize.regular
+}
+
 extension EnvironmentValues {
     var taskbarAccent: AppAccent {
         get { self[TaskbarAccentKey.self] }
         set { self[TaskbarAccentKey.self] = newValue }
+    }
+
+    var taskbarSize: TaskbarSize {
+        get { self[TaskbarSizeKey.self] }
+        set { self[TaskbarSizeKey.self] = newValue }
     }
 }
 
@@ -109,9 +280,11 @@ struct ThemedRoot<Content: View>: View {
         content
             .preferredColorScheme(settings.appearance.colorScheme)
             .environment(\.taskbarAccent, settings.accent)
+            .environment(\.taskbarSize, settings.barSize)
             .environmentObject(settings)
             .background(Color.clear)
             .animation(TaskbarMotion.hover, value: settings.appearance)
             .animation(TaskbarMotion.hover, value: settings.accent)
+            .animation(TaskbarMotion.sizeChange, value: settings.barSize)
     }
 }

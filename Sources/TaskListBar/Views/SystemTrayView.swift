@@ -9,6 +9,7 @@ struct SystemTrayView: View {
     @ObservedObject var clock: ClockModel
     var isCalendarOpen: Bool = false
     var onToggleCalendar: (() -> Void)?
+    @Environment(\.taskbarSize) private var size
 
     var body: some View {
         HStack(spacing: 3) {
@@ -30,13 +31,14 @@ struct SystemTrayView: View {
                 onToggle: { onToggleCalendar?() }
             )
         }
-        .frame(height: TaskbarMetrics.trayHit)
+        .frame(height: size.trayHit)
         .padding(.trailing, 2)
     }
 }
 
 struct BatteryTrayButton: View {
     let status: BatteryMonitor.Status
+    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
     private var helpText: String {
@@ -75,11 +77,11 @@ struct BatteryTrayButton: View {
             }
         } label: {
             Image(systemName: symbolName)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: size.traySymbol, weight: .medium))
                 .foregroundStyle(status.percentage ?? 100 <= 15 && !status.isCharging ? Color.red.opacity(0.95) : Color.primary.opacity(0.85))
-                .frame(width: TaskbarMetrics.trayHit, height: TaskbarMetrics.trayHit)
+                .frame(width: size.trayHit, height: size.trayHit)
                 .background(
-                    RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
+                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                         .fill(hovering ? TaskbarTheme.hover : Color.clear)
                 )
         }
@@ -97,18 +99,19 @@ struct SpacesTrayButton: View {
     let space: Int
     let count: Int
     let action: () -> Void
+    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Text("\(space)")
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .font(.system(size: size.trayFont, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.primary.opacity(0.9))
-                .frame(minWidth: 18, minHeight: 18)
+                .frame(minWidth: size.trayHit - 4, minHeight: size.trayHit - 4)
                 .padding(.horizontal, 3)
                 .background(
-                    RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
+                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                         .fill(hovering ? Color.primary.opacity(0.16) : Color.primary.opacity(0.10))
                 )
         }
@@ -124,6 +127,7 @@ struct SpacesTrayButton: View {
 
 struct BluetoothTrayButton: View {
     @ObservedObject var bluetooth: BluetoothMonitor
+    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
     @State private var showingFlyout = false
 
@@ -142,22 +146,22 @@ struct BluetoothTrayButton: View {
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 15, height: 15)
+                    .frame(width: size.traySymbol + 3, height: size.traySymbol + 3)
                     .foregroundStyle(bluetooth.isPoweredOn ? Color.primary.opacity(0.92) : Color.primary.opacity(0.38))
 
                 if bluetooth.isPoweredOn, bluetooth.connectedCount > 0 {
                     Circle()
                         .fill(Color.green.opacity(0.95))
-                        .frame(width: 5, height: 5)
+                        .frame(width: max(4, size.traySymbol * 0.38), height: max(4, size.traySymbol * 0.38))
                         .offset(x: 5, y: -4)
                 }
             }
-            .frame(width: TaskbarMetrics.trayHit, height: TaskbarMetrics.trayHit)
+            .frame(width: size.trayHit, height: size.trayHit)
             .background(
-                RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
+                RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                     .fill(showingFlyout || hovering ? TaskbarTheme.hover : Color.clear)
             )
-            .contentShape(RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: size.corner, style: .continuous))
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.92))
         .onHover { hovering in
@@ -356,6 +360,7 @@ struct BluetoothFlyout: View {
 
 struct VolumeTrayButton: View {
     @ObservedObject var volume: VolumeMonitor
+    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
     @State private var showingFlyout = false
     @State private var scrollMonitor: Any?
@@ -375,11 +380,11 @@ struct VolumeTrayButton: View {
             showingFlyout.toggle()
         } label: {
             Image(systemName: symbolName)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: size.traySymbol, weight: .medium))
                 .foregroundStyle(volume.isMuted ? Color.primary.opacity(0.45) : Color.primary.opacity(0.85))
-                .frame(width: TaskbarMetrics.trayHit, height: TaskbarMetrics.trayHit)
+                .frame(width: size.trayHit, height: size.trayHit)
                 .background(
-                    RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
+                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                         .fill(showingFlyout || hovering ? TaskbarTheme.hover : Color.clear)
                 )
         }
@@ -467,6 +472,7 @@ struct ClockTrayView: View {
     var isOpen: Bool = false
     var onToggle: (() -> Void)?
 
+    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
     var body: some View {
@@ -474,19 +480,19 @@ struct ClockTrayView: View {
             onToggle?()
         } label: {
             Text(text)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: size.trayFont, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(.primary.opacity(0.92))
                 .lineLimit(1)
                 .padding(.horizontal, 6)
-                .frame(height: TaskbarMetrics.trayHit)
+                .frame(height: size.trayHit)
                 .background(
-                    RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
+                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                         .fill(isOpen || hovering ? TaskbarTheme.hover : Color.clear)
                 )
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
-        .frame(height: TaskbarMetrics.trayHit)
+        .frame(height: size.trayHit)
         .onHover { hovering in
             withAnimation(TaskbarMotion.hover) {
                 self.hovering = hovering
