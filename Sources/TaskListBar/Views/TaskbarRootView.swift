@@ -7,18 +7,15 @@ enum TaskbarMetrics {
     static let appButtonWidth: CGFloat = 32
     static let trayHit: CGFloat = 22
     static let indicatorHeight: CGFloat = 2
-    static let corner: CGFloat = 4
+    static let corner: CGFloat = 8
 }
 
 struct TaskbarTheme {
-    /// Keep tint light so NSVisualEffectView blur stays visible.
-    static let barTint = Color.black.opacity(0.18)
-    static let barBorder = Color.white.opacity(0.10)
-    static let accent = Color(red: 0.20, green: 0.55, blue: 0.95)
-    static let startButton = Color(red: 0.12, green: 0.45, blue: 0.85).opacity(0.90)
-    static let hover = Color.white.opacity(0.12)
-    static let activeFill = Color.white.opacity(0.16)
-    static let menuTint = Color.black.opacity(0.22)
+    static let hover = Color.primary.opacity(0.08)
+    static let activeFill = Color.primary.opacity(0.12)
+    static let hairline = Color.primary.opacity(0.14)
+    static let chrome = Color.primary.opacity(0.08)
+    static let footerFill = Color.primary.opacity(0.06)
 }
 
 struct TaskbarRootView: View {
@@ -31,7 +28,7 @@ struct TaskbarRootView: View {
             }
 
             Rectangle()
-                .fill(Color.white.opacity(0.14))
+                .fill(TaskbarTheme.hairline)
                 .frame(width: 1, height: 18)
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -48,8 +45,15 @@ struct TaskbarRootView: View {
                         } quitAction: {
                             viewModel.quit(item)
                         }
+                        .transition(
+                            .asymmetric(
+                                insertion: .scale(scale: 0.55).combined(with: .opacity),
+                                removal: .scale(scale: 0.55).combined(with: .opacity)
+                            )
+                        )
                     }
                 }
+                .animation(TaskbarMotion.list, value: viewModel.items.map(\.id))
             }
 
             Spacer(minLength: 6)
@@ -57,16 +61,20 @@ struct TaskbarRootView: View {
             SystemTrayView(
                 battery: viewModel.batteryMonitor,
                 spaces: viewModel.spacesMonitor,
-                trash: viewModel.trashMonitor,
-                clock: viewModel.clockModel
+                bluetooth: viewModel.bluetoothMonitor,
+                volume: viewModel.volumeMonitor,
+                clock: viewModel.clockModel,
+                isCalendarOpen: viewModel.isCalendarOpen,
+                onToggleCalendar: { viewModel.toggleCalendarPreview() }
             )
         }
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(TaskbarTheme.barTint)
+        .frame(height: TaskbarMetrics.barHeight)
+        .modifier(TaskbarPointerLock())
         .overlay(alignment: .top) {
             Rectangle()
-                .fill(TaskbarTheme.barBorder)
+                .fill(TaskbarTheme.hairline)
                 .frame(height: 0.5)
         }
     }
@@ -75,27 +83,58 @@ struct TaskbarRootView: View {
 struct StartButton: View {
     let isOpen: Bool
     let action: () -> Void
+    @Environment(\.taskbarAccent) private var accent
     @State private var hovering = false
+
+    private let avatarSize: CGFloat = 22
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: "square.grid.2x2.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("开始")
-                    .font(.system(size: 11, weight: .semibold))
+            VStack(spacing: 2) {
+                avatar
+                    .scaleEffect(hovering || isOpen ? 1.08 : 1.0)
+                Capsule()
+                    .fill(isOpen ? accent.color : Color.clear)
+                    .frame(width: isOpen ? 14 : 0, height: TaskbarMetrics.indicatorHeight)
             }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 8)
-            .frame(height: 24)
+            .frame(width: TaskbarMetrics.appButtonWidth, height: 28)
             .background(
                 RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous)
-                    .fill(isOpen || hovering ? TaskbarTheme.startButton : TaskbarTheme.startButton.opacity(0.82))
+                    .fill(isOpen || hovering ? TaskbarTheme.activeFill : Color.clear)
             )
+            .contentShape(RoundedRectangle(cornerRadius: TaskbarMetrics.corner, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help("开始菜单")
+        .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
+        .onHover { hovering in
+            withAnimation(TaskbarMotion.hover) {
+                self.hovering = hovering
+            }
+        }
+        .help("开始菜单 · \(CurrentUserProfile.displayName)")
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        Group {
+            if let image = CurrentUserProfile.image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: avatarSize, height: avatarSize)
+            } else {
+                ZStack {
+                    Circle().fill(accent.color.opacity(0.92))
+                    Text(CurrentUserProfile.initials)
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .foregroundStyle(accent.onAccent)
+                }
+                .frame(width: avatarSize, height: avatarSize)
+            }
+        }
+        .clipShape(Circle())
+        .overlay(
+            Circle().strokeBorder(Color.primary.opacity(0.16), lineWidth: 0.5)
+        )
     }
 }
 
@@ -105,6 +144,7 @@ struct TaskbarAppButton: View {
     let pinAction: () -> Void
     let quitAction: () -> Void
 
+    @Environment(\.taskbarAccent) private var accent
     @State private var hovering = false
 
     var body: some View {
@@ -114,9 +154,12 @@ struct TaskbarAppButton: View {
                     .resizable()
                     .interpolation(.high)
                     .frame(width: TaskbarMetrics.iconSize, height: TaskbarMetrics.iconSize)
+                    .scaleEffect(hovering ? 1.12 : 1.0)
                 Capsule()
-                    .fill(item.isRunning ? (item.isActive ? TaskbarTheme.accent : Color.white.opacity(0.50)) : Color.clear)
-                    .frame(width: item.isActive ? 14 : 6, height: TaskbarMetrics.indicatorHeight)
+                    .fill(item.isRunning ? (item.isActive ? accent.color : Color.primary.opacity(0.45)) : Color.clear)
+                    .frame(width: item.isActive ? 14 : (item.isRunning ? 6 : 0), height: TaskbarMetrics.indicatorHeight)
+                    .animation(TaskbarMotion.indicator, value: item.isActive)
+                    .animation(TaskbarMotion.indicator, value: item.isRunning)
             }
             .frame(width: TaskbarMetrics.appButtonWidth, height: 28)
             .background(
@@ -124,8 +167,12 @@ struct TaskbarAppButton: View {
                     .fill(item.isActive || hovering ? TaskbarTheme.activeFill : Color.clear)
             )
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
+        .onHover { hovering in
+            withAnimation(TaskbarMotion.hover) {
+                self.hovering = hovering
+            }
+        }
         .help(item.name)
         .contextMenu {
             Button(item.isPinned ? "从任务栏取消固定" : "固定到任务栏", action: pinAction)
@@ -137,55 +184,88 @@ struct TaskbarAppButton: View {
     }
 }
 
-struct VisualEffectView: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .menu
-    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
-    var emphasized: Bool = true
-
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        view.isEmphasized = emphasized
-        view.wantsLayer = true
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-        nsView.state = .active
-        nsView.isEmphasized = emphasized
-    }
-}
-
-import AppKit
-
 /// Hosting view that accepts the first click even when the app is inactive.
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> where Content: View {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    var locksArrowCursor = false
 
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var acceptsFirstResponder: Bool { true }
+
+    override func resetCursorRects() {
+        if locksArrowCursor {
+            addCursorRect(bounds, cursor: .arrow)
+        } else {
+            super.resetCursorRects()
+        }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if locksArrowCursor {
+            NSCursor.arrow.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) ?? self
+    }
 }
 
 enum GlassPanelFactory {
+    /// Native macOS glass: Liquid Glass on 26+, vibrancy fallback earlier.
     static func wrap<Content: View>(
         _ rootView: Content,
-        material: NSVisualEffectView.Material = .menu
-    ) -> NSVisualEffectView {
-        let hosting = FirstMouseHostingView(rootView: rootView)
-        hosting.translatesAutoresizingMaskIntoConstraints = true
-        hosting.autoresizingMask = [.width, .height]
+        cornerRadius: CGFloat = 0,
+        lockArrowCursor: Bool = false
+    ) -> NSView {
+        let hosting = FirstMouseHostingView(rootView: rootView.background(Color.clear))
+        hosting.locksArrowCursor = lockArrowCursor
+        hosting.wantsLayer = true
+        hosting.layer?.isOpaque = false
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
 
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.style = .regular
+            glass.cornerRadius = cornerRadius
+            glass.clipsToBounds = cornerRadius > 0
+            glass.wantsLayer = true
+            glass.layer?.isOpaque = false
+            glass.layer?.masksToBounds = cornerRadius > 0
+            glass.contentView = hosting
+            if let content = glass.contentView {
+                content.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    content.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
+                    content.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
+                    content.topAnchor.constraint(equalTo: glass.topAnchor),
+                    content.bottomAnchor.constraint(equalTo: glass.bottomAnchor)
+                ])
+            }
+            return glass
+        }
+
+        hosting.translatesAutoresizingMaskIntoConstraints = false
         let effect = NSVisualEffectView()
-        effect.material = material
+        effect.material = cornerRadius > 0 ? .popover : .menu
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.isEmphasized = true
         effect.wantsLayer = true
-        hosting.frame = effect.bounds
+        if cornerRadius > 0 {
+            effect.layer?.cornerRadius = cornerRadius
+            effect.layer?.cornerCurve = .continuous
+            effect.layer?.masksToBounds = true
+        }
         effect.addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: effect.topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: effect.bottomAnchor)
+        ])
         return effect
     }
 }

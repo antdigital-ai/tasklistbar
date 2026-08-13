@@ -7,15 +7,23 @@ enum AppIconCache {
     private static var icons: [String: NSImage] = [:]
     private static var names: [String: String] = [:]
     private static var urls: [String: URL] = [:]
+    private static let rasterScale: CGFloat = 2
 
     static func icon(forFile path: String, size: CGFloat = 64) -> NSImage {
-        lock.lock()
-        defer { lock.unlock() }
         let key = "\(path)|\(Int(size))"
-        if let cached = icons[key] { return cached }
-        let image = NSWorkspace.shared.icon(forFile: path)
-        image.size = NSSize(width: size, height: size)
+        lock.lock()
+        if let cached = icons[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let source = NSWorkspace.shared.icon(forFile: path)
+        let image = rasterize(source, side: size)
+
+        lock.lock()
         icons[key] = image
+        lock.unlock()
         return image
     }
 
@@ -30,10 +38,10 @@ enum AppIconCache {
         }
         lock.unlock()
 
-        let image = fallback
+        let source = fallback
             ?? NSImage(systemSymbolName: "app.fill", accessibilityDescription: bid)
             ?? NSImage()
-        image.size = NSSize(width: size, height: size)
+        let image = rasterize(source, side: size)
         lock.lock()
         icons[bid] = image
         lock.unlock()
@@ -92,5 +100,46 @@ enum AppIconCache {
             names.removeAll(keepingCapacity: true)
             urls.removeAll(keepingCapacity: true)
         }
+    }
+
+    /// NSWorkspace icons are full-size ICNS (often 1024px). Setting `NSImage.size`
+    /// only changes the preferred drawing size, so SwiftUI would still upload the
+    /// huge bitmap. Rasterize once at the display size.
+    private static func rasterize(_ source: NSImage, side: CGFloat) -> NSImage {
+        let pointSize = NSSize(width: side, height: side)
+        let pixels = max(1, Int((side * rasterScale).rounded()))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            let copy = source.copy() as? NSImage ?? source
+            copy.size = pointSize
+            return copy
+        }
+        rep.size = pointSize
+        NSGraphicsContext.saveGraphicsState()
+        if let context = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.current = context
+            context.imageInterpolation = .high
+            source.draw(
+                in: NSRect(origin: .zero, size: pointSize),
+                from: .zero,
+                operation: .copy,
+                fraction: 1
+            )
+        }
+        NSGraphicsContext.restoreGraphicsState()
+
+        let output = NSImage(size: pointSize)
+        output.addRepresentation(rep)
+        return output
     }
 }

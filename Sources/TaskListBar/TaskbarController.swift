@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -10,26 +11,34 @@ final class TaskbarController: NSObject {
     private var panel: NSPanel?
     private var startMenuPanel: NSPanel?
     private var modifierKeysPanel: NSPanel?
+    private var calendarPanel: NSPanel?
+    private var settingsPanel: NSPanel?
     private var statusItem: NSStatusItem?
     private var screenObserver: NSObjectProtocol?
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
+    private var localKeyMonitor: Any?
+    private var hotkeyCenter = HotkeyCenter()
+    private let windowAvoider = WindowAvoider()
     private var cancellables = Set<AnyCancellable>()
 
     init(
         appMonitor: AppMonitor,
         pinnedStore: PinnedAppsStore,
         startMenuCatalog: StartMenuCatalog,
-        modifierKeyRemapper: ModifierKeyRemapper
+        modifierKeyRemapper: ModifierKeyRemapper,
+        appSettings: AppSettings
     ) {
         self.viewModel = TaskbarViewModel(
             appMonitor: appMonitor,
             pinnedStore: pinnedStore,
             startMenuCatalog: startMenuCatalog,
             modifierKeyRemapper: modifierKeyRemapper,
+            appSettings: appSettings,
             batteryMonitor: BatteryMonitor(),
             spacesMonitor: SpacesMonitor(),
-            trashMonitor: TrashMonitor()
+            bluetoothMonitor: BluetoothMonitor(),
+            volumeMonitor: VolumeMonitor()
         )
         super.init()
     }
@@ -40,7 +49,10 @@ final class TaskbarController: NSObject {
         layoutPanels()
         observeScreens()
         observeClicksOutside()
+        observeHotkeys()
+        observeWindowAvoidance()
         viewModel.startTrayMonitors()
+        prewarmStartMenu()
 
         viewModel.$isStartMenuOpen
             .receive(on: RunLoop.main)
@@ -55,36 +67,146 @@ final class TaskbarController: NSObject {
                 self?.syncModifierKeysVisibility()
             }
             .store(in: &cancellables)
+
+        viewModel.$isCalendarOpen
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncCalendarVisibility()
+            }
+            .store(in: &cancellables)
+
+        viewModel.$isCalendarExpanded
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateCalendarHeight()
+            }
+            .store(in: &cancellables)
+
+        viewModel.$isCalendarAgendaExpanded
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateCalendarHeight()
+            }
+            .store(in: &cancellables)
+
+        viewModel.$isSettingsOpen
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncSettingsVisibility()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Build the start-menu panel ahead of the first click so opening feels instant.
+    private func prewarmStartMenu() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard let self else { return }
+            self.createStartMenuPanelIfNeeded()
+            self.layoutPanels()
+            guard let panel = self.startMenuPanel else { return }
+            // Force Liquid Glass to compile while the menu is still invisible.
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            panel.displayIfNeeded()
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !self.viewModel.isStartMenuOpen else { return }
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+        }
     }
 
     private func createStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = NSImage(
+            let image = NSImage(
                 systemSymbolName: "menubar.dock.rectangle",
                 accessibilityDescription: "TaskListBar"
             )
+            image?.isTemplate = true
+            button.image = image
             button.toolTip = "TaskListBar"
         }
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "打开开始菜单", action: #selector(statusOpenStartMenu), keyEquivalent: "")
-        menu.addItem(withTitle: "修饰键设置", action: #selector(statusOpenModifierKeys), keyEquivalent: "")
+        menu.delegate = self
+        menu.addItem(statusItem("打开开始菜单", symbol: "square.grid.2x2", action: #selector(statusOpenStartMenu)))
+        menu.addItem(statusItem("设置", symbol: "gearshape", action: #selector(statusOpenSettings), key: ","))
+        menu.addItem(statusItem("修饰键设置", symbol: "keyboard", action: #selector(statusOpenModifierKeys)))
         menu.addItem(.separator())
-        menu.addItem(withTitle: "显示任务栏", action: #selector(statusShowTaskbar), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "退出 TaskListBar", action: #selector(statusQuit), keyEquivalent: "q")
-        for menuItem in menu.items {
-            menuItem.target = self
+        let launchItem = statusItem("开机时启动", symbol: "power", action: #selector(statusToggleLaunchAtLogin))
+        launchItem.tag = StatusMenuTag.launchAtLogin.rawValue
+        menu.addItem(launchItem)
+        let dockItem = statusItem("隐藏系统 Dock", symbol: "menubar.dock.rectangle", action: #selector(statusToggleHideDock))
+        dockItem.tag = StatusMenuTag.hideDock.rawValue
+        menu.addItem(dockItem)
+
+        let themeMenu = NSMenu()
+        for appearance in AppAppearance.allCases {
+            let themeOption = statusItem(
+                appearance.title,
+                symbol: appearance.systemImage,
+                action: #selector(statusSetAppearance(_:))
+            )
+            themeOption.representedObject = appearance.rawValue
+            themeOption.tag = StatusMenuTag.appearanceBase.rawValue
+            themeMenu.addItem(themeOption)
         }
-        item.menu = menu
+        let themeItem = statusItem("主题", symbol: "circle.lefthalf.filled", action: nil)
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
+        menu.addItem(.separator())
+        menu.addItem(statusItem("刷新开始菜单缓存", symbol: "arrow.clockwise", action: #selector(statusRefreshStartMenu)))
+        menu.addItem(statusItem("显示任务栏", symbol: "rectangle.bottomhalf.inset.filled", action: #selector(statusShowTaskbar)))
+        menu.addItem(statusItem("打开日志文件夹", symbol: "folder", action: #selector(statusOpenLogs)))
+        menu.addItem(.separator())
+        menu.addItem(statusItem("退出 TaskListBar", symbol: "power", action: #selector(statusQuit), key: "q"))
         statusItem = item
+        item.menu = menu
+    }
+
+    private func statusItem(_ title: String, symbol: String, action: Selector?, key: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = action == nil ? nil : self
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
+            item.image = image
+        }
+        return item
+    }
+
+    private enum StatusMenuTag: Int {
+        case launchAtLogin = 101
+        case hideDock = 102
+        case appearanceBase = 200
     }
 
     @objc private func statusOpenStartMenu() {
+        viewModel.closeOverlays()
         viewModel.isStartMenuOpen = true
-        viewModel.isModifierKeysOpen = false
-        viewModel.startMenuCatalog.refresh()
+        viewModel.startMenuCatalog.refresh(force: false)
+    }
+
+    @objc private func statusOpenSettings() {
+        viewModel.openSettings()
+    }
+
+    @objc private func statusToggleLaunchAtLogin() {
+        viewModel.appSettings.setLaunchAtLogin(!viewModel.appSettings.launchAtLogin)
+    }
+
+    @objc private func statusToggleHideDock() {
+        viewModel.appSettings.setHideDock(!viewModel.appSettings.hideDock)
+    }
+
+    @objc private func statusSetAppearance(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let appearance = AppAppearance(rawValue: raw)
+        else { return }
+        viewModel.appSettings.setAppearance(appearance)
+    }
+
+    @objc private func statusRefreshStartMenu() {
+        viewModel.startMenuCatalog.refresh(force: true)
     }
 
     @objc private func statusOpenModifierKeys() {
@@ -96,17 +218,23 @@ final class TaskbarController: NSObject {
         panel?.orderFrontRegardless()
     }
 
+    @objc private func statusOpenLogs() {
+        AppLog.openInFinder()
+    }
+
     @objc private func statusQuit() {
         NSApp.terminate(nil)
     }
 
     private func createTaskbarPanel() {
         let glass = GlassPanelFactory.wrap(
-            TaskbarRootView(viewModel: viewModel),
-            material: .menu
+            ThemedRoot(settings: viewModel.appSettings) {
+                TaskbarRootView(viewModel: viewModel)
+            },
+            lockArrowCursor: true
         )
 
-        let panel = NSPanel(
+        let panel = TaskbarPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -121,6 +249,13 @@ final class TaskbarController: NSObject {
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = true
+        panel.isMovable = false
+        panel.isMovableByWindowBackground = false
+        panel.isRestorable = false
+        panel.minSize = NSSize(width: 0, height: TaskbarMetrics.barHeight)
+        panel.maxSize = NSSize(width: 10_000, height: TaskbarMetrics.barHeight)
+        panel.contentMinSize = NSSize(width: 0, height: TaskbarMetrics.barHeight)
+        panel.contentMaxSize = NSSize(width: 10_000, height: TaskbarMetrics.barHeight)
         panel.contentView = glass
         panel.ignoresMouseEvents = false
         panel.acceptsMouseMovedEvents = true
@@ -133,11 +268,13 @@ final class TaskbarController: NSObject {
         if startMenuPanel != nil { return }
 
         let glass = GlassPanelFactory.wrap(
-            StartMenuView(viewModel: viewModel),
-            material: .popover
+            ThemedRoot(settings: viewModel.appSettings) {
+                StartMenuView(viewModel: viewModel)
+            },
+            cornerRadius: 20
         )
 
-        let panel = NSPanel(
+        let panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 560),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -160,13 +297,15 @@ final class TaskbarController: NSObject {
         if modifierKeysPanel != nil { return }
 
         let glass = GlassPanelFactory.wrap(
-            ModifierKeysSettingsView(remapper: viewModel.modifierKeyRemapper) { [weak self] in
-                self?.viewModel.closeModifierKeysSettings()
+            ThemedRoot(settings: viewModel.appSettings) {
+                ModifierKeysSettingsView(remapper: viewModel.modifierKeyRemapper) { [weak self] in
+                    self?.viewModel.closeModifierKeysSettings()
+                }
             },
-            material: .popover
+            cornerRadius: 20
         )
 
-        let panel = NSPanel(
+        let panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 420),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -183,6 +322,78 @@ final class TaskbarController: NSObject {
         panel.contentView = glass
 
         modifierKeysPanel = panel
+    }
+
+    private func createCalendarPanelIfNeeded() {
+        if calendarPanel != nil { return }
+
+        let glass = GlassPanelFactory.wrap(
+            CalendarPanelRoot(
+                settings: viewModel.appSettings,
+                viewModel: viewModel
+            ),
+            cornerRadius: CalendarPreviewView.Metrics.corner
+        )
+
+        let panel = KeyablePanel(
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: CalendarPreviewView.Metrics.width,
+                height: CalendarPreviewView.Metrics.height
+            ),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.contentView = glass
+
+        calendarPanel = panel
+    }
+
+    private func createSettingsPanelIfNeeded() {
+        if settingsPanel != nil { return }
+
+        let glass = GlassPanelFactory.wrap(
+            ThemedRoot(settings: viewModel.appSettings) {
+                AppSettingsView(
+                    settings: viewModel.appSettings,
+                    onOpenModifierKeys: { [weak self] in
+                        self?.viewModel.openModifierKeysSettings()
+                    },
+                    onClose: { [weak self] in
+                        self?.viewModel.closeSettings()
+                    }
+                )
+            },
+            cornerRadius: 20
+        )
+
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 620),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.contentView = glass
+
+        settingsPanel = panel
     }
 
     private func layoutPanels() {
@@ -221,30 +432,362 @@ final class TaskbarController: NSObject {
             )
             modifiers.setFrame(menuFrame, display: true)
         }
+
+        if let calendar = calendarPanel {
+            calendar.setFrame(calendarTargetFrame(), display: true)
+        }
+
+        if let settings = settingsPanel {
+            let menuFrame = NSRect(
+                x: frame.minX + 8,
+                y: frame.minY + Self.barHeight + 8,
+                width: 420,
+                height: 500
+            )
+            settings.setFrame(menuFrame, display: true)
+        }
     }
 
     private func syncStartMenuVisibility() {
         if viewModel.isStartMenuOpen {
             createStartMenuPanelIfNeeded()
-            layoutPanels()
-            startMenuPanel?.orderFrontRegardless()
-            startMenuPanel?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            animateStartMenu(show: true) { [weak self] in
+                guard let self, self.viewModel.isStartMenuOpen else { return }
+                self.startMenuPanel?.makeKeyAndOrderFront(nil)
+                self.focusFirstTextField(in: self.startMenuPanel)
+            }
         } else {
-            startMenuPanel?.orderOut(nil)
+            animateStartMenu(show: false)
         }
     }
 
     private func syncModifierKeysVisibility() {
         if viewModel.isModifierKeysOpen {
             createModifierKeysPanelIfNeeded()
-            layoutPanels()
-            modifierKeysPanel?.orderFrontRegardless()
-            modifierKeysPanel?.makeKeyAndOrderFront(nil)
+            animatePanel(
+                modifierKeysPanel,
+                show: true,
+                target: modifierKeysTargetFrame()
+            )
             NSApp.activate(ignoringOtherApps: true)
         } else {
-            modifierKeysPanel?.orderOut(nil)
+            animatePanel(
+                modifierKeysPanel,
+                show: false,
+                target: modifierKeysTargetFrame()
+            )
         }
+    }
+
+    private func syncCalendarVisibility() {
+        if viewModel.isCalendarOpen {
+            createCalendarPanelIfNeeded()
+            animatePanel(
+                calendarPanel,
+                show: true,
+                target: calendarTargetFrame()
+            )
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            animatePanel(
+                calendarPanel,
+                show: false,
+                target: calendarTargetFrame()
+            )
+        }
+    }
+
+    private func syncSettingsVisibility() {
+        if viewModel.isSettingsOpen {
+            createSettingsPanelIfNeeded()
+            animatePanel(
+                settingsPanel,
+                show: true,
+                target: settingsTargetFrame()
+            )
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            animatePanel(
+                settingsPanel,
+                show: false,
+                target: settingsTargetFrame()
+            )
+        }
+    }
+
+    private func animateStartMenu(show: Bool, onShown: (() -> Void)? = nil) {
+        guard let panel = startMenuPanel else { return }
+        let target = startMenuTargetFrame()
+        if panel.frame != target {
+            panel.setFrame(target, display: false)
+        }
+
+        guard let content = panel.contentView, let layer = content.layer else {
+            animatePanel(panel, show: show, target: target, duration: TaskbarMotion.Panel.startMenuShowDuration, onShown: onShown)
+            return
+        }
+
+        resetLayerGeometry(layer)
+
+        if show {
+            panel.alphaValue = 1
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.opacity = 0
+            CATransaction.commit()
+            panel.orderFrontRegardless()
+            content.layoutSubtreeIfNeeded()
+            let hidden = startMenuPopTransform(
+                scale: TaskbarMotion.Panel.startMenuFromScale,
+                in: content,
+                layer: layer
+            )
+
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.transform = hidden
+            layer.opacity = 1
+            CATransaction.commit()
+
+            animateStartMenuLayer(
+                layer,
+                fromTransform: hidden,
+                fromOpacity: 1,
+                toTransform: CATransform3DIdentity,
+                toOpacity: 1,
+                duration: TaskbarMotion.Panel.startMenuShowDuration,
+                timing: TaskbarMotion.Panel.startMenuTiming
+            ) {
+                DispatchQueue.main.async { onShown?() }
+            }
+        } else if panel.isVisible {
+            let hidden = startMenuPopTransform(
+                scale: TaskbarMotion.Panel.startMenuFromScale,
+                in: content,
+                layer: layer
+            )
+            let fromTransform = layer.presentation()?.transform ?? CATransform3DIdentity
+            let fromOpacity = layer.presentation()?.opacity ?? layer.opacity
+            animateStartMenuLayer(
+                layer,
+                fromTransform: fromTransform,
+                fromOpacity: fromOpacity,
+                toTransform: hidden,
+                toOpacity: 0,
+                duration: TaskbarMotion.Panel.startMenuHideDuration,
+                timing: TaskbarMotion.Panel.startMenuHideTiming,
+                fadeBeginFraction: TaskbarMotion.Panel.startMenuFadeBegin,
+                fadeTiming: TaskbarMotion.Panel.startMenuFadeTiming
+            ) { [weak panel] in
+                guard let panel else { return }
+                panel.orderOut(nil)
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                panel.contentView?.layer?.transform = CATransform3DIdentity
+                panel.contentView?.layer?.opacity = 1
+                CATransaction.commit()
+            }
+        }
+    }
+
+    /// NSView-hosted layers suppress implicit transform animation, so the
+    /// scale must be an explicit CAAnimation or it jumps with no in-between.
+    private func animateStartMenuLayer(
+        _ layer: CALayer,
+        fromTransform: CATransform3D,
+        fromOpacity: Float,
+        toTransform: CATransform3D,
+        toOpacity: Float,
+        duration: TimeInterval,
+        timing: CAMediaTimingFunction,
+        fadeBeginFraction: Double = 0,
+        fadeTiming: CAMediaTimingFunction? = nil,
+        completion: (() -> Void)?
+    ) {
+        layer.removeAnimation(forKey: "startMenuPop")
+
+        let pop = CABasicAnimation(keyPath: "transform")
+        pop.fromValue = NSValue(caTransform3D: fromTransform)
+        pop.toValue = NSValue(caTransform3D: toTransform)
+        pop.duration = duration
+        pop.timingFunction = timing
+
+        var animations: [CAAnimation] = [pop]
+        if fromOpacity != toOpacity {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = fromOpacity
+            fade.toValue = toOpacity
+            fade.beginTime = duration * fadeBeginFraction
+            fade.duration = max(0.001, duration * (1 - fadeBeginFraction))
+            fade.timingFunction = fadeTiming ?? timing
+            fade.fillMode = .both
+            animations.append(fade)
+        }
+
+        let group = CAAnimationGroup()
+        group.animations = animations
+        group.duration = duration
+        group.fillMode = .forwards
+        group.isRemovedOnCompletion = false
+
+        CATransaction.begin()
+        CATransaction.setCompletionBlock {
+            DispatchQueue.main.async {
+                layer.removeAnimation(forKey: "startMenuPop")
+                layer.transform = toTransform
+                layer.opacity = toOpacity
+                completion?()
+            }
+        }
+        layer.add(group, forKey: "startMenuPop")
+        layer.transform = toTransform
+        layer.opacity = toOpacity
+        CATransaction.commit()
+    }
+
+    /// Scale around the menu's bottom-left. Layer transforms are relative to
+    /// `anchorPoint` (the center), so the pivot must be converted out of bounds space.
+    private func startMenuPopTransform(scale: CGFloat, in view: NSView, layer: CALayer) -> CATransform3D {
+        let bounds = layer.bounds.width > 1 ? layer.bounds : view.bounds
+        let flipped = view.isFlipped || layer.isGeometryFlipped
+        let pivot = CGPoint(
+            x: bounds.minX,
+            y: flipped ? bounds.maxY : bounds.minY
+        )
+        let anchor = CGPoint(
+            x: bounds.minX + layer.anchorPoint.x * bounds.width,
+            y: bounds.minY + layer.anchorPoint.y * bounds.height
+        )
+        let px = pivot.x - anchor.x
+        let py = pivot.y - anchor.y
+
+        var transform = CATransform3DIdentity
+        transform = CATransform3DTranslate(transform, px, py, 0)
+        transform = CATransform3DScale(transform, scale, scale, 1)
+        transform = CATransform3DTranslate(transform, -px, -py, 0)
+        return transform
+    }
+
+    private func resetLayerGeometry(_ layer: CALayer) {
+        let center = CGPoint(x: 0.5, y: 0.5)
+        let old = layer.anchorPoint
+        if abs(old.x - center.x) > 0.0001 || abs(old.y - center.y) > 0.0001 {
+            layer.anchorPoint = center
+            var position = layer.position
+            position.x += (center.x - old.x) * layer.bounds.width
+            position.y += (center.y - old.y) * layer.bounds.height
+            layer.position = position
+        }
+        layer.shouldRasterize = false
+    }
+
+    private func animatePanel(
+        _ panel: NSPanel?,
+        show: Bool,
+        target: NSRect,
+        duration: TimeInterval = TaskbarMotion.Panel.showDuration,
+        onShown: (() -> Void)? = nil
+    ) {
+        guard let panel else { return }
+        resetContentLift(panel)
+        if panel.frame != target {
+            panel.setFrame(target, display: false)
+        }
+
+        let timing = show ? TaskbarMotion.Panel.showTiming : TaskbarMotion.Panel.hideTiming
+
+        if show {
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            panel.displayIfNeeded()
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = duration
+                context.timingFunction = timing
+                panel.animator().alphaValue = 1
+            }, completionHandler: {
+                DispatchQueue.main.async {
+                    onShown?()
+                }
+            })
+        } else if panel.isVisible {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = duration
+                context.timingFunction = timing
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                panel.orderOut(nil)
+                panel.alphaValue = 1
+            })
+        }
+    }
+
+    private func resetContentLift(_ panel: NSPanel) {
+        guard let layer = panel.contentView?.layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.transform = CATransform3DIdentity
+        CATransaction.commit()
+    }
+
+    private func startMenuTargetFrame() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let frame = screen.frame
+        let visible = screen.visibleFrame
+        let menuHeight = min(560, max(360, visible.height - 80))
+        return NSRect(
+            x: frame.minX + 8,
+            y: frame.minY + Self.barHeight + 8,
+            width: 420,
+            height: menuHeight
+        )
+    }
+
+    private func modifierKeysTargetFrame() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let frame = screen.frame
+        return NSRect(
+            x: frame.minX + 8,
+            y: frame.minY + Self.barHeight + 8,
+            width: 420,
+            height: 420
+        )
+    }
+
+    private func calendarTargetFrame() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let frame = screen.frame
+        let height = CalendarPreviewView.Metrics.panelHeight(
+            monthExpanded: viewModel.isCalendarExpanded,
+            agendaExpanded: viewModel.isCalendarAgendaExpanded
+        )
+        return NSRect(
+            x: frame.maxX - CalendarPreviewView.Metrics.width - 10,
+            y: frame.minY + Self.barHeight + 10,
+            width: CalendarPreviewView.Metrics.width,
+            height: height
+        )
+    }
+
+    private func updateCalendarHeight() {
+        guard viewModel.isCalendarOpen, let panel = calendarPanel else { return }
+        let target = calendarTargetFrame()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = TaskbarMotion.Panel.resizeDuration
+            context.timingFunction = TaskbarMotion.Panel.resizeTiming
+            panel.animator().setFrame(target, display: true)
+        }
+    }
+
+    private func settingsTargetFrame() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let frame = screen.frame
+        return NSRect(
+            x: frame.minX + 8,
+            y: frame.minY + Self.barHeight + 8,
+            width: 420,
+            height: 620
+        )
     }
 
     private func observeScreens() {
@@ -256,6 +799,122 @@ final class TaskbarController: NSObject {
             Task { @MainActor in
                 self?.layoutPanels()
             }
+        }
+    }
+
+    private func observeHotkeys() {
+        hotkeyCenter.onAction = { [weak self] action in
+            self?.handleHotkey(action)
+        }
+        hotkeyCenter.setChord(viewModel.appSettings.startMenuHotkey, for: .startMenu)
+        hotkeyCenter.setChord(viewModel.appSettings.calendarHotkey, for: .calendar)
+
+        viewModel.appSettings.$startMenuHotkey
+            .receive(on: RunLoop.main)
+            .sink { [weak self] chord in
+                self?.hotkeyCenter.setChord(chord, for: .startMenu)
+            }
+            .store(in: &cancellables)
+
+        viewModel.appSettings.$calendarHotkey
+            .receive(on: RunLoop.main)
+            .sink { [weak self] chord in
+                self?.hotkeyCenter.setChord(chord, for: .calendar)
+            }
+            .store(in: &cancellables)
+
+        viewModel.appSettings.$isRecordingHotkey
+            .receive(on: RunLoop.main)
+            .sink { [weak self] recording in
+                if recording {
+                    self?.hotkeyCenter.suspend()
+                } else {
+                    self?.hotkeyCenter.resume()
+                }
+            }
+            .store(in: &cancellables)
+
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleLocalKey(event) ?? event
+        }
+    }
+
+    private func observeWindowAvoidance() {
+        if viewModel.appSettings.avoidOverlappingWindows {
+            windowAvoider.setEnabled(true)
+            windowAvoider.start()
+        }
+        viewModel.appSettings.$avoidOverlappingWindows
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] enabled in
+                guard let self else { return }
+                self.windowAvoider.setEnabled(enabled)
+                if enabled {
+                    self.windowAvoider.start()
+                    if !self.windowAvoider.isTrusted {
+                        self.windowAvoider.requestAccess()
+                    }
+                } else {
+                    self.windowAvoider.stop()
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func handleHotkey(_ action: HotkeyCenter.Action) {
+        switch action {
+        case .startMenu:
+            AppLog.info("快捷键：开始菜单", category: "hotkey")
+            viewModel.toggleStartMenu()
+        case .calendar:
+            AppLog.info("快捷键：日历", category: "hotkey")
+            viewModel.toggleCalendarPreview()
+        }
+    }
+
+    private func handleLocalKey(_ event: NSEvent) -> NSEvent? {
+        if viewModel.appSettings.isRecordingHotkey {
+            return event
+        }
+
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        if event.keyCode == 53, modifiers.isEmpty {
+            if viewModel.isCalendarAgendaExpanded {
+                viewModel.isCalendarAgendaExpanded = false
+                return nil
+            }
+            if viewModel.hasOpenOverlay {
+                viewModel.closeOverlays()
+                return nil
+            }
+            return event
+        }
+
+        guard viewModel.isCalendarOpen, !viewModel.isSettingsOpen, modifiers.isEmpty else {
+            return event
+        }
+
+        switch event.keyCode {
+        case 123:
+            viewModel.requestCalendarShift(-1)
+            return nil
+        case 124:
+            viewModel.requestCalendarShift(1)
+            return nil
+        case 126:
+            if !viewModel.isCalendarExpanded {
+                viewModel.toggleCalendarMonth()
+            }
+            return nil
+        case 125:
+            if viewModel.isCalendarExpanded {
+                viewModel.toggleCalendarMonth()
+            }
+            return nil
+        default:
+            return event
         }
     }
 
@@ -284,6 +943,107 @@ final class TaskbarController: NSObject {
             let inModifiers = modifierKeysPanel?.frame.contains(location) == true
             if !inModifiers && !inBar {
                 viewModel.closeModifierKeysSettings()
+            }
+        }
+
+        if viewModel.isCalendarOpen {
+            let inCalendar = calendarPanel?.frame.contains(location) == true
+            if !inCalendar && !inBar {
+                viewModel.closeCalendarPreview()
+            }
+        }
+
+        if viewModel.isSettingsOpen {
+            let inSettings = settingsPanel?.frame.contains(location) == true
+            if !inSettings && !inBar {
+                viewModel.closeSettings()
+            }
+        }
+    }
+
+    private func focusFirstTextField(in panel: NSPanel?) {
+        guard let panel else { return }
+        DispatchQueue.main.async {
+            guard panel.isVisible else { return }
+            guard let field = Self.firstEditableTextField(in: panel.contentView) else { return }
+            if panel.firstResponder !== field {
+                panel.makeFirstResponder(field)
+            }
+        }
+    }
+
+    private static func firstEditableTextField(in view: NSView?) -> NSTextField? {
+        guard let view else { return nil }
+        if let field = view as? NSTextField, field.isEditable {
+            return field
+        }
+        for subview in view.subviews {
+            if let field = firstEditableTextField(in: subview) {
+                return field
+            }
+        }
+        return nil
+    }
+}
+
+final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override init(
+        contentRect: NSRect,
+        styleMask style: NSWindow.StyleMask,
+        backing backingStoreType: NSWindow.BackingStoreType,
+        defer flag: Bool
+    ) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        animationBehavior = .none
+    }
+}
+
+final class TaskbarPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        var rect = frameRect
+        rect.size.height = TaskbarMetrics.barHeight
+        if let screen = screen ?? self.screen {
+            rect.origin.y = screen.frame.minY
+        }
+        return rect
+    }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(lockedFrame(frameRect), display: flag)
+    }
+
+    override func setFrame(_ frameRect: NSRect, display displayFlag: Bool, animate animateFlag: Bool) {
+        super.setFrame(lockedFrame(frameRect), display: displayFlag, animate: animateFlag)
+    }
+
+    private func lockedFrame(_ frameRect: NSRect) -> NSRect {
+        var rect = frameRect
+        rect.size.height = TaskbarMetrics.barHeight
+        if let screen {
+            rect.origin.y = screen.frame.minY
+        }
+        return rect
+    }
+}
+
+extension TaskbarController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if let item = menu.item(withTag: StatusMenuTag.launchAtLogin.rawValue) {
+            item.state = viewModel.appSettings.launchAtLogin ? .on : .off
+        }
+        if let item = menu.item(withTag: StatusMenuTag.hideDock.rawValue) {
+            item.state = viewModel.appSettings.hideDock ? .on : .off
+        }
+        if let themeItem = menu.items.first(where: { $0.submenu != nil && $0.title == "主题" }) {
+            for item in themeItem.submenu?.items ?? [] {
+                let raw = item.representedObject as? String
+                item.state = raw == viewModel.appSettings.appearance.rawValue ? .on : .off
             }
         }
     }

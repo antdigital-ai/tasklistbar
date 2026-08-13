@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -9,17 +10,20 @@ final class AppMonitor: ObservableObject {
 
     private var observers: [NSObjectProtocol] = []
     private var debounceTask: Task<Void, Never>?
+    private var windowPollTask: Task<Void, Never>?
     private var lastSignature: String = ""
 
     func start() {
         refresh(immediate: true)
 
         let workspace = NSWorkspace.shared.notificationCenter
-        // Focus + lifecycle only. Hide/unhide/deactivate spam rebuilds without changing the list.
+        // Focus + lifecycle + hide. Window open/close is covered by a light poll.
         let names: [NSNotification.Name] = [
             NSWorkspace.didLaunchApplicationNotification,
             NSWorkspace.didTerminateApplicationNotification,
-            NSWorkspace.didActivateApplicationNotification
+            NSWorkspace.didActivateApplicationNotification,
+            NSWorkspace.didHideApplicationNotification,
+            NSWorkspace.didUnhideApplicationNotification
         ]
 
         for name in names {
@@ -30,11 +34,24 @@ final class AppMonitor: ObservableObject {
             }
             observers.append(token)
         }
+
+        windowPollTask?.cancel()
+        windowPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.refresh(immediate: true)
+                }
+            }
+        }
     }
 
     func stop() {
         debounceTask?.cancel()
         debounceTask = nil
+        windowPollTask?.cancel()
+        windowPollTask = nil
         let workspace = NSWorkspace.shared.notificationCenter
         for token in observers {
             workspace.removeObserver(token)
@@ -55,10 +72,13 @@ final class AppMonitor: ObservableObject {
 
     func refresh(immediate: Bool = true) {
         _ = immediate
+        let uiPIDs = Self.pidsWithUIWindows()
         let apps = NSWorkspace.shared.runningApplications.filter { app in
             guard app.activationPolicy == .regular else { return false }
             guard let bid = app.bundleIdentifier else { return false }
-            return bid != AppItemFactory.ownBundleID
+            guard bid != AppItemFactory.ownBundleID else { return false }
+            // Skip background/agent processes that declare .regular but have no real UI.
+            return uiPIDs.contains(app.processIdentifier)
         }
         .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
 
@@ -70,6 +90,43 @@ final class AppMonitor: ObservableObject {
         lastSignature = signature
         runningApps = apps
         frontmostBundleID = front
+    }
+
+    /// Layer-0 windows large enough to count as real app UI (not 1×1 agents / menu crumbs).
+    private static func pidsWithUIWindows() -> Set<pid_t> {
+        guard let infoList = CGWindowListCopyWindowInfo(
+            [.excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return []
+        }
+
+        var result = Set<pid_t>()
+        for info in infoList {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t else { continue }
+            let layer = info[kCGWindowLayer as String] as? Int ?? 0
+            guard layer == 0 else { continue }
+
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            guard alpha > 0.05 else { continue }
+
+            if let bounds = info[kCGWindowBounds as String] as? [String: Any] {
+                let width = cgFloatValue(bounds["Width"])
+                let height = cgFloatValue(bounds["Height"])
+                // Tiny / off-screen agent windows should not keep an app in the taskbar.
+                if width < 50 || height < 50 { continue }
+            }
+
+            result.insert(pid)
+        }
+        return result
+    }
+
+    private static func cgFloatValue(_ raw: Any?) -> CGFloat {
+        if let number = raw as? NSNumber { return CGFloat(truncating: number) }
+        if let value = raw as? CGFloat { return value }
+        if let value = raw as? Double { return CGFloat(value) }
+        return 0
     }
 
     func activateOrLaunch(item: TaskbarAppItem) {

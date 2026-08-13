@@ -12,6 +12,8 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>TaskListBar</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -26,8 +28,22 @@
 	<true/>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>TaskListBar 需要辅助功能权限，以便窗口最大化时避开底部任务栏。</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>TaskListBar 需要控制 Finder 以清倒废纸篓。</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>TaskListBar 需要蓝牙权限，以便在任务栏显示连接状态并开关蓝牙。</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>TaskListBar 需要蓝牙权限，以便在任务栏显示连接状态并开关蓝牙。</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>TaskListBar 需要读取日历，以便在任务栏预览中显示日程和节假日。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>TaskListBar 需要读取日历，以便在任务栏预览中显示日程和节假日。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>TaskListBar 需要位置以在日历中显示本周天气。</string>
+	<key>NSLocationUsageDescription</key>
+	<string>TaskListBar 需要位置以在日历中显示本周天气。</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>MDItemKeywords</key>

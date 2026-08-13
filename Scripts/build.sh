@@ -25,6 +25,7 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BIN" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$ROOT/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+cp "$ROOT/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
 # Ad-hoc sign so macOS launches it reliably

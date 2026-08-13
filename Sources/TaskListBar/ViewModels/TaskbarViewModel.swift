@@ -7,16 +7,30 @@ final class TaskbarViewModel: ObservableObject {
     @Published private(set) var items: [TaskbarAppItem] = []
     @Published var isStartMenuOpen = false
     @Published var isModifierKeysOpen = false
+    @Published var isCalendarOpen = false
+    @Published var isCalendarExpanded: Bool
+    @Published var isCalendarAgendaExpanded = false
+    @Published var isSettingsOpen = false
     @Published var showsAllApps = false
+    @Published var calendarNavigate = CalendarNavigate()
+
+    struct CalendarNavigate: Equatable {
+        var generation = 0
+        var delta = 0
+    }
 
     let appMonitor: AppMonitor
     let pinnedStore: PinnedAppsStore
     let startMenuCatalog: StartMenuCatalog
     let modifierKeyRemapper: ModifierKeyRemapper
+    let appSettings: AppSettings
     let batteryMonitor: BatteryMonitor
     let spacesMonitor: SpacesMonitor
-    let trashMonitor: TrashMonitor
+    let bluetoothMonitor: BluetoothMonitor
+    let volumeMonitor: VolumeMonitor
     let clockModel = ClockModel()
+    let calendarStore = CalendarStore()
+    let weatherStore = WeatherStore()
 
     private var cancellables = Set<AnyCancellable>()
     private var rebuildTask: Task<Void, Never>?
@@ -27,17 +41,22 @@ final class TaskbarViewModel: ObservableObject {
         pinnedStore: PinnedAppsStore,
         startMenuCatalog: StartMenuCatalog,
         modifierKeyRemapper: ModifierKeyRemapper,
+        appSettings: AppSettings,
         batteryMonitor: BatteryMonitor,
         spacesMonitor: SpacesMonitor,
-        trashMonitor: TrashMonitor
+        bluetoothMonitor: BluetoothMonitor,
+        volumeMonitor: VolumeMonitor
     ) {
         self.appMonitor = appMonitor
         self.pinnedStore = pinnedStore
         self.startMenuCatalog = startMenuCatalog
         self.modifierKeyRemapper = modifierKeyRemapper
+        self.appSettings = appSettings
         self.batteryMonitor = batteryMonitor
         self.spacesMonitor = spacesMonitor
-        self.trashMonitor = trashMonitor
+        self.bluetoothMonitor = bluetoothMonitor
+        self.volumeMonitor = volumeMonitor
+        self.isCalendarExpanded = appSettings.calendarExpanded
 
         appMonitor.objectWillChange
             .receive(on: RunLoop.main)
@@ -49,6 +68,15 @@ final class TaskbarViewModel: ObservableObject {
             .sink { [weak self] _ in self?.scheduleRebuild() }
             .store(in: &cancellables)
 
+        $isCalendarExpanded
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] expanded in
+                self?.appSettings.setCalendarExpanded(expanded)
+                AppLog.info(expanded ? "日历展开为整月" : "日历收起为一周", category: "calendar")
+            }
+            .store(in: &cancellables)
+
         rebuildItems()
         // Warm start-menu cache in background after launch.
         startMenuCatalog.refresh(force: false)
@@ -57,15 +85,20 @@ final class TaskbarViewModel: ObservableObject {
     func startTrayMonitors() {
         batteryMonitor.start()
         spacesMonitor.start()
-        trashMonitor.start()
+        bluetoothMonitor.start()
+        volumeMonitor.start()
         clockModel.start()
+        calendarStore.start()
+        weatherStore.start()
     }
 
     func stopTrayMonitors() {
         batteryMonitor.stop()
         spacesMonitor.stop()
-        trashMonitor.stop()
+        bluetoothMonitor.stop()
+        volumeMonitor.stop()
         clockModel.stop()
+        calendarStore.stop()
     }
 
     private func scheduleRebuild() {
@@ -148,43 +181,84 @@ final class TaskbarViewModel: ObservableObject {
     }
 
     func select(_ item: TaskbarAppItem) {
-        isStartMenuOpen = false
-        isModifierKeysOpen = false
+        closeOverlays()
         appMonitor.activateOrLaunch(item: item)
     }
 
     func toggleStartMenu() {
-        isStartMenuOpen.toggle()
         if isStartMenuOpen {
-            isModifierKeysOpen = false
+            isStartMenuOpen = false
             showsAllApps = false
-            startMenuCatalog.searchText = ""
-            startMenuCatalog.refresh(force: false)
-        } else {
-            showsAllApps = false
+            startMenuCatalog.selectedCategory = nil
+            return
         }
+
+        isModifierKeysOpen = false
+        isCalendarOpen = false
+        isSettingsOpen = false
+        showsAllApps = false
+        startMenuCatalog.selectedCategory = nil
+        if !startMenuCatalog.searchText.isEmpty {
+            startMenuCatalog.searchText = ""
+        }
+        isStartMenuOpen = true
     }
 
     func closeStartMenu() {
         isStartMenuOpen = false
         showsAllApps = false
+        startMenuCatalog.selectedCategory = nil
         startMenuCatalog.searchText = ""
     }
 
     func openAllApps() {
         showsAllApps = true
+        startMenuCatalog.selectedCategory = nil
         startMenuCatalog.searchText = ""
         startMenuCatalog.refresh(force: false)
     }
 
     func backToStartHome() {
         showsAllApps = false
+        startMenuCatalog.clearCategory()
         startMenuCatalog.searchText = ""
+    }
+
+    func toggleCalendarPreview() {
+        isCalendarOpen.toggle()
+        if isCalendarOpen {
+            isStartMenuOpen = false
+            showsAllApps = false
+            isModifierKeysOpen = false
+            isSettingsOpen = false
+            startMenuCatalog.selectedCategory = nil
+            startMenuCatalog.searchText = ""
+            calendarStore.prepare()
+            calendarStore.load(month: Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: Date())) ?? Date())
+            weatherStore.refreshIfNeeded()
+            isCalendarAgendaExpanded = false
+            AppLog.info(isCalendarExpanded ? "打开日历（整月）" : "打开日历（一周）", category: "calendar")
+        }
+    }
+
+    func closeCalendarPreview() {
+        isCalendarOpen = false
+        isCalendarAgendaExpanded = false
+    }
+
+    func openSystemCalendar() {
+        closeCalendarPreview()
+        let calendar = URL(fileURLWithPath: "/System/Applications/Calendar.app")
+        if FileManager.default.fileExists(atPath: calendar.path) {
+            NSWorkspace.shared.open(calendar)
+        }
     }
 
     func openModifierKeysSettings() {
         isStartMenuOpen = false
         showsAllApps = false
+        isCalendarOpen = false
+        isSettingsOpen = false
         startMenuCatalog.searchText = ""
         isModifierKeysOpen = true
         modifierKeyRemapper.reapply()
@@ -192,6 +266,49 @@ final class TaskbarViewModel: ObservableObject {
 
     func closeModifierKeysSettings() {
         isModifierKeysOpen = false
+    }
+
+    func openSettings() {
+        isStartMenuOpen = false
+        showsAllApps = false
+        isCalendarOpen = false
+        isModifierKeysOpen = false
+        startMenuCatalog.searchText = ""
+        isSettingsOpen = true
+    }
+
+    func closeSettings() {
+        appSettings.isRecordingHotkey = false
+        isSettingsOpen = false
+    }
+
+    func closeOverlays() {
+        isStartMenuOpen = false
+        isModifierKeysOpen = false
+        isCalendarOpen = false
+        isSettingsOpen = false
+        isCalendarAgendaExpanded = false
+        appSettings.isRecordingHotkey = false
+        showsAllApps = false
+        startMenuCatalog.selectedCategory = nil
+        startMenuCatalog.searchText = ""
+    }
+
+    var hasOpenOverlay: Bool {
+        isStartMenuOpen || isModifierKeysOpen || isCalendarOpen || isSettingsOpen || isCalendarAgendaExpanded
+    }
+
+    func requestCalendarShift(_ delta: Int) {
+        guard isCalendarOpen else { return }
+        calendarNavigate = CalendarNavigate(generation: calendarNavigate.generation + 1, delta: delta)
+    }
+
+    func toggleCalendarMonth() {
+        guard isCalendarOpen else { return }
+        isCalendarExpanded.toggle()
+        if isCalendarExpanded {
+            isCalendarAgendaExpanded = false
+        }
     }
 
     func pin(_ item: TaskbarAppItem) {

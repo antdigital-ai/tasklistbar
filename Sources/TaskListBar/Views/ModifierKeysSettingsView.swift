@@ -3,6 +3,7 @@ import SwiftUI
 struct ModifierKeysSettingsView: View {
     @ObservedObject var remapper: ModifierKeyRemapper
     let onClose: () -> Void
+    @Environment(\.taskbarAccent) private var accent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -12,13 +13,6 @@ struct ModifierKeysSettingsView: View {
             footer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(TaskbarTheme.menuTint)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .padding(2)
     }
 
     private var header: some View {
@@ -26,20 +20,20 @@ struct ModifierKeysSettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("修饰键")
                     .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                 Text("为外置键盘调整 Control / Command 等键位，效果与系统设置一致。")
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(.primary.opacity(0.55))
             }
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(.primary.opacity(0.8))
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.white.opacity(0.1)))
+                    .background(Circle().fill(Color.primary.opacity(0.1)))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
         }
         .padding(.horizontal, 18)
         .padding(.top, 16)
@@ -65,16 +59,16 @@ struct ModifierKeysSettingsView: View {
             }
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
+                    .fill(Color.primary.opacity(0.06))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             )
 
             Text("更改会立即生效；唤醒后会自动恢复。启用「Windows 键盘」时会接管系统修饰键设置，避免与系统设置重复映射。")
                 .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(.primary.opacity(0.45))
                 .fixedSize(horizontal: false, vertical: true)
 
             if let error = remapper.lastError {
@@ -113,24 +107,24 @@ struct ModifierKeysSettingsView: View {
         HStack {
             Label("键盘设置", systemImage: "keyboard")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(.primary.opacity(0.7))
             Spacer()
             Button(action: onClose) {
                 Text("完成")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(accent.onAccent)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(TaskbarTheme.startButton.opacity(0.9))
+                            .fill(accent.color.opacity(0.9))
                     )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
-        .background(Color.black.opacity(0.18))
+        .background(TaskbarTheme.footerFill)
     }
 }
 
@@ -143,7 +137,7 @@ private struct ModifierKeyRow: View {
         HStack {
             Text(role.title)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(.primary.opacity(0.92))
             Spacer()
             Picker("", selection: Binding(
                 get: { selection },
@@ -156,7 +150,7 @@ private struct ModifierKeyRow: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 150, alignment: .trailing)
-            .tint(.white)
+            .tint(.primary)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -168,6 +162,7 @@ private struct PresetChip: View {
     let subtitle: String
     let isSelected: Bool
     let action: () -> Void
+    @Environment(\.taskbarAccent) private var accent
 
     var body: some View {
         Button(action: action) {
@@ -176,20 +171,20 @@ private struct PresetChip: View {
                     .font(.system(size: 12, weight: .semibold))
                 Text(subtitle)
                     .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(.primary.opacity(0.55))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(isSelected ? accent.onAccent : .primary)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isSelected ? TaskbarTheme.startButton.opacity(0.85) : Color.white.opacity(0.08))
+                    .fill(isSelected ? accent.color.opacity(0.9) : Color.primary.opacity(0.08))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isSelected ? TaskbarTheme.accent.opacity(0.7) : Color.clear, lineWidth: 1)
+                    .stroke(isSelected ? accent.color.opacity(0.7) : Color.clear, lineWidth: 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
     }
 }

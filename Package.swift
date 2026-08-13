@@ -9,7 +9,13 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "TaskListBar",
-            path: "Sources/TaskListBar"
+            path: "Sources/TaskListBar",
+            linkerSettings: [
+                .linkedFramework("IOBluetooth"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("Collaboration")
+            ]
         )
     ]
 )
