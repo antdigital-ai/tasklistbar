@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "TaskListBar",
+    name: "KeelBar",
     platforms: [
         .macOS(.v13)
     ],
     targets: [
         .executableTarget(
-            name: "TaskListBar",
+            name: "KeelBar",
             path: "Sources/TaskListBar",
             linkerSettings: [
                 .linkedFramework("IOBluetooth"),

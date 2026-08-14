@@ -128,7 +128,7 @@ enum AppIconCache {
         NSGraphicsContext.saveGraphicsState()
         if let context = NSGraphicsContext(bitmapImageRep: rep) {
             NSGraphicsContext.current = context
-            context.imageInterpolation = .high
+            context.imageInterpolation = .medium
             source.draw(
                 in: NSRect(origin: .zero, size: pointSize),
                 from: .zero,

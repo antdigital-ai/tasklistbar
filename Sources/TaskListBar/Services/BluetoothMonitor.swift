@@ -54,12 +54,12 @@ final class BluetoothMonitor: NSObject, ObservableObject {
                 }
             )
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
         }
-        timer?.tolerance = 2
+        timer?.tolerance = 15
     }
 
     func stop() {

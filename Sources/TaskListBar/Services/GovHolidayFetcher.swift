@@ -240,11 +240,7 @@ enum GovHolidayFetcher {
     }
 
     private static func cacheURL(year: Int) -> URL? {
-        let fm = FileManager.default
-        guard let root = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        let dir = root.appendingPathComponent("TaskListBar", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("holiday-\(year).json")
+        AppSupport.root.appendingPathComponent("holiday-\(year).json")
     }
 
     private static func saveCache(_ arrangement: HolidayArrangement) {

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-APP_NAME="TaskListBar"
+APP_NAME="KeelBar"
 BUILD_DIR="$ROOT/.build"
 APP_BUNDLE="$ROOT/dist/${APP_NAME}.app"
 CONFIG="${1:-debug}"

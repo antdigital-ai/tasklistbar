@@ -11,7 +11,7 @@ enum AppLog {
     }
 
     private static let lock = NSLock()
-    private static let logger = Logger(subsystem: "com.tasklistbar.app", category: "app")
+    private static let logger = Logger(subsystem: AppSupport.bundleID, category: "app")
     private static var handle: FileHandle?
     private static var dayStamp = ""
     private static let keepDays = 7
@@ -31,13 +31,11 @@ enum AppLog {
     }()
 
     static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("TaskListBar/logs", isDirectory: true)
+        AppSupport.root.appendingPathComponent("logs", isDirectory: true)
     }
 
     static var todayURL: URL {
-        directory.appendingPathComponent("tasklistbar-\(dayFormatter.string(from: Date())).log")
+        directory.appendingPathComponent("keelbar-\(dayFormatter.string(from: Date())).log")
     }
 
     static func bootstrap() {
@@ -115,7 +113,7 @@ enum AppLog {
         handle = nil
         dayStamp = today
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent("tasklistbar-\(today).log")
+        let url = directory.appendingPathComponent("keelbar-\(today).log")
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }

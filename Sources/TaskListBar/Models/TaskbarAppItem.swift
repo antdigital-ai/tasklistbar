@@ -1,8 +1,9 @@
 import AppKit
+import CoreGraphics
 import Foundation
 
 struct TaskbarAppItem: Identifiable, Hashable {
-    var id: String { bundleIdentifier }
+    let id: String
     let bundleIdentifier: String
     let name: String
     let icon: NSImage
@@ -11,10 +12,18 @@ struct TaskbarAppItem: Identifiable, Hashable {
     let isActive: Bool
     let isPinned: Bool
     let processIdentifier: pid_t?
+    let windowID: CGWindowID?
+    let windowTitle: String?
+    let windowCount: Int
+    let badge: Int?
+    let badgeIsUnread: Bool
+    let progress: Double?
+    let isUnresponsive: Bool
+    let isGrouped: Bool
 }
 
 enum AppItemFactory {
-    static let ownBundleID = Bundle.main.bundleIdentifier ?? "com.tasklistbar.app"
+    static let ownBundleID = Bundle.main.bundleIdentifier ?? AppSupport.bundleID
 
     static func make(
         bundleIdentifier: String,
@@ -24,9 +33,19 @@ enum AppItemFactory {
         isRunning: Bool,
         isActive: Bool,
         isPinned: Bool,
-        processIdentifier: pid_t? = nil
+        processIdentifier: pid_t? = nil,
+        windowID: CGWindowID? = nil,
+        windowTitle: String? = nil,
+        windowCount: Int = 0,
+        badge: Int? = nil,
+        badgeIsUnread: Bool = false,
+        progress: Double? = nil,
+        isUnresponsive: Bool = false,
+        isGrouped: Bool = true
     ) -> TaskbarAppItem {
-        TaskbarAppItem(
+        let id = windowID.map { "\(bundleIdentifier)#\($0)" } ?? bundleIdentifier
+        return TaskbarAppItem(
+            id: id,
             bundleIdentifier: bundleIdentifier,
             name: name,
             icon: icon ?? NSImage(systemSymbolName: "app.fill", accessibilityDescription: name) ?? NSImage(),
@@ -34,7 +53,15 @@ enum AppItemFactory {
             isRunning: isRunning,
             isActive: isActive,
             isPinned: isPinned,
-            processIdentifier: processIdentifier
+            processIdentifier: processIdentifier,
+            windowID: windowID,
+            windowTitle: windowTitle,
+            windowCount: windowCount,
+            badge: badge,
+            badgeIsUnread: badgeIsUnread,
+            progress: progress,
+            isUnresponsive: isUnresponsive,
+            isGrouped: isGrouped
         )
     }
 }

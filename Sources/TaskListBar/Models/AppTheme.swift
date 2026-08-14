@@ -144,6 +144,15 @@ enum TaskbarSize: String, CaseIterable, Identifiable {
         }
     }
 
+    var badgeFont: CGFloat {
+        switch self {
+        case .compact: return 7
+        case .regular: return 8
+        case .large: return 9
+        case .extraLarge: return 11
+        }
+    }
+
     var avatarInitials: CGFloat {
         switch self {
         case .compact: return 8

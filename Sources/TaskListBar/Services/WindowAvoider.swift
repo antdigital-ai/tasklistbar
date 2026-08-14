@@ -17,20 +17,39 @@ final class WindowAvoider {
     func start() {
         stop()
         let workspace = NSWorkspace.shared.notificationCenter
-        let names: [NSNotification.Name] = [
-            NSWorkspace.didActivateApplicationNotification,
-            NSWorkspace.didLaunchApplicationNotification,
-            NSWorkspace.activeSpaceDidChangeNotification
-        ]
-        for name in names {
-            observers.append(
-                workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.schedule(delay: 0.16)
-                    }
+        observers.append(
+            workspace.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.schedule(delay: 0.2, frontmostOnly: true)
                 }
-            )
-        }
+            }
+        )
+        observers.append(
+            workspace.addObserver(
+                forName: NSWorkspace.didLaunchApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.schedule(delay: 0.25)
+                }
+            }
+        )
+        observers.append(
+            workspace.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.schedule(delay: 0.28)
+                }
+            }
+        )
         observers.append(
             NotificationCenter.default.addObserver(
                 forName: NSApplication.didChangeScreenParametersNotification,
@@ -43,8 +62,9 @@ final class WindowAvoider {
             }
         )
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
+            guard Self.mouseIsNearTaskbar() else { return }
             Task { @MainActor in
-                self?.schedule(delay: 0.35, frontmostOnly: true)
+                self?.schedule(delay: 0.4, frontmostOnly: true)
             }
         }
         schedule(delay: 0.5)
@@ -82,6 +102,13 @@ final class WindowAvoider {
     }
 
     var isTrusted: Bool { AXIsProcessTrusted() }
+
+    private static func mouseIsNearTaskbar() -> Bool {
+        let location = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(location) } ?? NSScreen.main
+        guard let screen else { return false }
+        return location.y <= screen.frame.minY + TaskbarMetrics.barHeight + 48
+    }
 
     static func openAccessibilitySettings() {
         let urls = [

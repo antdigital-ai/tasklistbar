@@ -26,7 +26,7 @@ struct SystemTrayView: View {
 
             ClockTrayView(
                 text: clock.trayText,
-                helpText: clock.helpText(),
+                helpText: clock.helpText,
                 isOpen: isCalendarOpen,
                 onToggle: { onToggleCalendar?() }
             )

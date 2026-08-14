@@ -35,6 +35,12 @@ struct TaskbarRootView: View {
                 .fill(TaskbarTheme.hairline)
                 .frame(width: 1, height: size.dividerHeight)
 
+            FavoritesStripView(
+                store: viewModel.favoritesStore,
+                settings: viewModel.appSettings,
+                onPinApp: { viewModel.pinnedStore.pin($0) }
+            )
+
             TaskbarAppStrip(viewModel: viewModel)
 
             Spacer(minLength: 6)
@@ -101,6 +107,8 @@ struct TaskbarAppStrip: View {
                     }
                 } quitAction: {
                     viewModel.quit(item)
+                } closeWindowAction: {
+                    viewModel.closeWindow(item)
                 }
                 .transition(
                     .asymmetric(
@@ -126,7 +134,10 @@ struct TaskbarAppStrip: View {
             }
         )
         .onPreferenceChange(AppStripWidthKey.self) { contentWidth = $0 }
-        .onPreferenceChange(AppStripViewportKey.self) { viewportWidth = $0 }
+        .onPreferenceChange(AppStripViewportKey.self) { width in
+            viewportWidth = width
+            viewModel.updateStripWidth(width)
+        }
         .onChange(of: viewModel.items.map(\.id)) { _ in clampOffset() }
         .onChange(of: overflow) { _ in clampOffset() }
         .simultaneousGesture(
@@ -209,19 +220,63 @@ struct TaskbarAppButton: View {
     let action: () -> Void
     let pinAction: () -> Void
     let quitAction: () -> Void
+    var closeWindowAction: (() -> Void)?
 
     @Environment(\.taskbarAccent) private var accent
     @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
+    private var helpText: String {
+        if let title = item.windowTitle, !title.isEmpty, !item.isGrouped {
+            return "\(item.name) — \(title)"
+        }
+        if item.windowCount > 1 {
+            return "\(item.name) · \(item.windowCount) 个窗口"
+        }
+        return item.name
+    }
+
     var body: some View {
         Button(action: action) {
             VStack(spacing: 2) {
-                Image(nsImage: item.icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: size.iconSize, height: size.iconSize)
-                    .scaleEffect(hovering ? 1.12 : 1.0)
+                ZStack(alignment: .bottom) {
+                    ZStack(alignment: .topTrailing) {
+                        Image(nsImage: item.icon)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: size.iconSize, height: size.iconSize)
+                        if let badge = item.badge, badge > 0 {
+                            Text(badge > 99 ? "99+" : "\(badge)")
+                                .font(.system(size: size.badgeFont, weight: .bold, design: .rounded))
+                                .foregroundStyle(item.badgeIsUnread ? Color.white : Color.primary.opacity(0.92))
+                                .padding(.horizontal, badge > 9 ? 3 : 2)
+                                .padding(.vertical, 0.5)
+                                .background(Capsule().fill(item.badgeIsUnread ? Color.red.opacity(0.92) : Color.primary.opacity(0.16)))
+                                .offset(x: 4, y: -3)
+                        }
+                    }
+                    .overlay {
+                        if item.isUnresponsive {
+                            HungHatch()
+                                .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                        }
+                    }
+
+                    if let progress = item.progress, progress > 0, progress < 1 {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.primary.opacity(0.18))
+                                Capsule()
+                                    .fill(accent.color)
+                                    .frame(width: max(2, geo.size.width * progress))
+                            }
+                        }
+                        .frame(width: size.iconSize, height: 2)
+                        .offset(y: 1)
+                    }
+                }
+                .scaleEffect(hovering ? 1.12 : 1.0)
+
                 Capsule()
                     .fill(item.isRunning ? (item.isActive ? accent.color : Color.primary.opacity(0.45)) : Color.clear)
                     .frame(
@@ -244,14 +299,34 @@ struct TaskbarAppButton: View {
                 self.hovering = hovering
             }
         }
-        .help(item.name)
+        .help(helpText)
         .contextMenu {
             Button(item.isPinned ? "从任务栏取消固定" : "固定到任务栏", action: pinAction)
+            if item.windowID != nil {
+                Button("关闭窗口") { closeWindowAction?() }
+            }
             if item.isRunning {
                 Divider()
                 Button("退出 \(item.name)", action: quitAction)
             }
         }
+    }
+}
+
+private struct HungHatch: View {
+    var body: some View {
+        Canvas { context, size in
+            let spacing: CGFloat = 3.5
+            var x: CGFloat = -size.height
+            while x < size.width + size.height {
+                var path = Path()
+                path.move(to: CGPoint(x: x, y: size.height))
+                path.addLine(to: CGPoint(x: x + size.height, y: 0))
+                context.stroke(path, with: .color(.red.opacity(0.55)), lineWidth: 1.1)
+                x += spacing
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

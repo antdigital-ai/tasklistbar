@@ -26,7 +26,7 @@ struct AppSettingsView: View {
                 Text("设置")
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(.primary)
-                Text("开机启动、快捷键、外观、大小与系统 Dock。")
+                Text("开机启动、快捷键、外观、窗口分组与收藏。")
                     .font(.system(size: 12))
                     .foregroundStyle(.primary.opacity(0.55))
             }
@@ -51,11 +51,12 @@ struct AppSettingsView: View {
             appearancePicker
             sizePicker
             accentPicker
+            groupingPicker
 
             VStack(spacing: 0) {
                 SettingsToggleRow(
                     title: "开机时启动",
-                    subtitle: "登录后自动打开 TaskListBar",
+                    subtitle: "登录后自动打开 KeelBar",
                     systemImage: "power",
                     isOn: Binding(
                         get: { settings.launchAtLogin },
@@ -80,6 +81,46 @@ struct AppSettingsView: View {
                     isOn: Binding(
                         get: { settings.avoidOverlappingWindows },
                         set: { settings.setAvoidOverlappingWindows($0) }
+                    )
+                )
+                Divider().opacity(0.18)
+                SettingsToggleRow(
+                    title: "显示窗口数",
+                    subtitle: "合并格上显示该应用的窗口数量",
+                    systemImage: "number",
+                    isOn: Binding(
+                        get: { settings.showWindowCount },
+                        set: { settings.setShowWindowCount($0) }
+                    )
+                )
+                Divider().opacity(0.18)
+                SettingsToggleRow(
+                    title: "显示角标",
+                    subtitle: "从 Dock 读取未读数，红点显示在图标上",
+                    systemImage: "app.badge",
+                    isOn: Binding(
+                        get: { settings.showBadges },
+                        set: { settings.setShowBadges($0) }
+                    )
+                )
+                Divider().opacity(0.18)
+                SettingsToggleRow(
+                    title: "收藏桌面",
+                    subtitle: "在开始按钮右侧显示桌面",
+                    systemImage: "desktopcomputer",
+                    isOn: Binding(
+                        get: { settings.showDesktopFavorite },
+                        set: { settings.setShowDesktopFavorite($0) }
+                    )
+                )
+                Divider().opacity(0.18)
+                SettingsToggleRow(
+                    title: "收藏废纸篓",
+                    subtitle: "显示废纸篓；右键可清倒",
+                    systemImage: "trash",
+                    isOn: Binding(
+                        get: { settings.showTrashFavorite },
+                        set: { settings.setShowTrashFavorite($0) }
                     )
                 )
             }
@@ -130,7 +171,7 @@ struct AppSettingsView: View {
             }
             .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.98))
 
-            Text("隐藏 Dock 会打开自动隐藏并拉长唤出延迟。最大化避开底栏需要在「系统设置 → 隐私与安全性 → 辅助功能」中允许 TaskListBar。")
+            Text("隐藏 Dock 会打开自动隐藏并拉长唤出延迟。最大化避开底栏需要在「系统设置 → 隐私与安全性 → 辅助功能」中允许 KeelBar。")
                 .font(.system(size: 11))
                 .foregroundStyle(.primary.opacity(0.45))
                 .fixedSize(horizontal: false, vertical: true)
@@ -225,7 +266,7 @@ struct AppSettingsView: View {
             }
             .foregroundStyle(.primary.opacity(0.85))
 
-            Text("日志保存在「应用程序支持/TaskListBar/logs」，默认保留 7 天。")
+            Text("日志保存在「应用程序支持/KeelBar/logs」，默认保留 7 天。")
                 .font(.system(size: 11))
                 .foregroundStyle(.primary.opacity(0.45))
                 .fixedSize(horizontal: false, vertical: true)
@@ -295,6 +336,41 @@ struct AppSettingsView: View {
         }
     }
 
+    private var groupingPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("窗口分组")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.55))
+            HStack(spacing: 8) {
+                ForEach(WindowGrouping.allCases) { grouping in
+                    Button {
+                        settings.setWindowGrouping(grouping)
+                    } label: {
+                        VStack(spacing: 4) {
+                            Text(grouping.title)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(grouping.subtitle)
+                                .font(.system(size: 9))
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.85)
+                        }
+                        .foregroundStyle(settings.windowGrouping == grouping ? settings.accent.onAccent : .primary)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(settings.windowGrouping == grouping ? settings.accent.color.opacity(0.9) : Color.primary.opacity(0.06))
+                        )
+                    }
+                    .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
+                    .help(grouping.subtitle)
+                }
+            }
+        }
+    }
+
     private var accentPicker: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("强调色")
@@ -332,7 +408,7 @@ struct AppSettingsView: View {
 
     private var footer: some View {
         HStack {
-            Label("TaskListBar", systemImage: "menubar.dock.rectangle")
+            Label("KeelBar", systemImage: "menubar.dock.rectangle")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.7))
             Spacer()

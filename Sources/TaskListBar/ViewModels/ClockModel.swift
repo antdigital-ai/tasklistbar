@@ -9,6 +9,7 @@ final class ClockModel: ObservableObject {
     @Published private(set) var weekdayText = ""
     @Published private(set) var dayText = ""
     @Published private(set) var timeText = ""
+    @Published private(set) var helpText = ""
 
     private var timer: Timer?
 
@@ -85,7 +86,8 @@ final class ClockModel: ObservableObject {
     }
 
     func helpText(for date: Date = Date()) -> String {
-        Self.helpFormatter.string(from: date) + "（点击查看日程、节假日和放假安排）"
+        if date == now, !helpText.isEmpty { return helpText }
+        return Self.helpFormatter.string(from: date) + "（点击查看日程、节假日和放假安排）"
     }
 
     func monthTitle(for date: Date) -> String {
@@ -97,10 +99,16 @@ final class ClockModel: ObservableObject {
     }
 
     private func refreshTexts(_ date: Date) {
-        now = date
-        trayText = Self.trayFormatter.string(from: date)
-        weekdayText = Self.weekdayFormatter.string(from: date)
-        dayText = Self.dayFormatter.string(from: date)
-        timeText = Self.timeFormatter.string(from: date)
+        let nextTray = Self.trayFormatter.string(from: date)
+        let nextWeekday = Self.weekdayFormatter.string(from: date)
+        let nextDay = Self.dayFormatter.string(from: date)
+        let nextTime = Self.timeFormatter.string(from: date)
+        let nextHelp = Self.helpFormatter.string(from: date) + "（点击查看日程、节假日和放假安排）"
+        if trayText != nextTray { trayText = nextTray }
+        if weekdayText != nextWeekday { weekdayText = nextWeekday }
+        if dayText != nextDay { dayText = nextDay }
+        if timeText != nextTime { timeText = nextTime }
+        if helpText != nextHelp { helpText = nextHelp }
+        if abs(now.timeIntervalSince(date)) >= 1 { now = date }
     }
 }

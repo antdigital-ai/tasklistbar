@@ -11,8 +11,14 @@ final class TaskbarViewModel: ObservableObject {
     @Published var isCalendarExpanded: Bool
     @Published var isCalendarAgendaExpanded = false
     @Published var isSettingsOpen = false
+    @Published var isWindowListOpen = false
+    @Published var windowListBundleID: String?
+    @Published var windowListAppName = ""
+    @Published var windowListIcon = NSImage()
+    @Published var windowListAnchorX: CGFloat = 0
     @Published var showsAllApps = false
     @Published var calendarNavigate = CalendarNavigate()
+    @Published private(set) var appStripAvailableWidth: CGFloat = 0
 
     struct CalendarNavigate: Equatable {
         var generation = 0
@@ -28,6 +34,7 @@ final class TaskbarViewModel: ObservableObject {
     let spacesMonitor: SpacesMonitor
     let bluetoothMonitor: BluetoothMonitor
     let volumeMonitor: VolumeMonitor
+    let favoritesStore: FavoritesStore
     let clockModel = ClockModel()
     let calendarStore = CalendarStore()
     let weatherStore = WeatherStore()
@@ -45,7 +52,8 @@ final class TaskbarViewModel: ObservableObject {
         batteryMonitor: BatteryMonitor,
         spacesMonitor: SpacesMonitor,
         bluetoothMonitor: BluetoothMonitor,
-        volumeMonitor: VolumeMonitor
+        volumeMonitor: VolumeMonitor,
+        favoritesStore: FavoritesStore
     ) {
         self.appMonitor = appMonitor
         self.pinnedStore = pinnedStore
@@ -56,6 +64,7 @@ final class TaskbarViewModel: ObservableObject {
         self.spacesMonitor = spacesMonitor
         self.bluetoothMonitor = bluetoothMonitor
         self.volumeMonitor = volumeMonitor
+        self.favoritesStore = favoritesStore
         self.isCalendarExpanded = appSettings.calendarExpanded
 
         appMonitor.objectWillChange
@@ -64,6 +73,35 @@ final class TaskbarViewModel: ObservableObject {
             .store(in: &cancellables)
 
         pinnedStore.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.scheduleRebuild() }
+            .store(in: &cancellables)
+
+        appMonitor.windowCatalog.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.scheduleRebuild() }
+            .store(in: &cancellables)
+
+        appSettings.$windowGrouping
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.scheduleRebuild() }
+            .store(in: &cancellables)
+
+        appSettings.$showWindowCount
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.scheduleRebuild() }
+            .store(in: &cancellables)
+
+        appSettings.$showBadges
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.scheduleRebuild() }
+            .store(in: &cancellables)
+
+        appSettings.$barSize
+            .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.scheduleRebuild() }
             .store(in: &cancellables)
@@ -78,8 +116,6 @@ final class TaskbarViewModel: ObservableObject {
             .store(in: &cancellables)
 
         rebuildItems()
-        // Warm start-menu cache in background after launch.
-        startMenuCatalog.refresh(force: false)
     }
 
     func startTrayMonitors() {
@@ -90,6 +126,7 @@ final class TaskbarViewModel: ObservableObject {
         clockModel.start()
         calendarStore.start()
         weatherStore.start()
+        favoritesStore.start()
     }
 
     func stopTrayMonitors() {
@@ -99,6 +136,7 @@ final class TaskbarViewModel: ObservableObject {
         volumeMonitor.stop()
         clockModel.stop()
         calendarStore.stop()
+        favoritesStore.stop()
     }
 
     private func scheduleRebuild() {
@@ -110,12 +148,20 @@ final class TaskbarViewModel: ObservableObject {
         }
     }
 
+    func updateStripWidth(_ width: CGFloat) {
+        guard abs(width - appStripAvailableWidth) > 8 else { return }
+        appStripAvailableWidth = width
+        rebuildItems()
+    }
+
     func rebuildItems() {
         let running = appMonitor.runningApps
         let frontID = appMonitor.frontmostBundleID
-        var result: [TaskbarAppItem] = []
-        result.reserveCapacity(pinnedStore.pinnedBundleIDs.count + running.count)
-        var seen = Set<String>()
+        let frontWindowID = appMonitor.windowCatalog.frontmostWindowID
+        let pinned = pinnedStore.pinnedBundleIDs
+        let catalog = appMonitor.windowCatalog
+        let showBadges = appSettings.showBadges
+        let showCount = appSettings.showWindowCount
 
         let runningByID = Dictionary(
             running.compactMap { app -> (String, NSRunningApplication)? in
@@ -125,64 +171,181 @@ final class TaskbarViewModel: ObservableObject {
             uniquingKeysWith: { first, _ in first }
         )
 
-        for bid in pinnedStore.pinnedBundleIDs {
-            seen.insert(bid)
-            let runningMatch = runningByID[bid]
-            let url = runningMatch?.bundleURL ?? AppIconCache.url(forBundleID: bid)
-            let name = AppIconCache.displayName(
-                forBundleID: bid,
-                url: url,
-                runningName: runningMatch?.localizedName
-            )
-            let icon = AppIconCache.icon(
-                forBundleID: bid,
-                url: url,
-                fallback: runningMatch?.icon,
-                size: 64
-            )
+        struct AppEntry {
+            let bid: String
+            let running: NSRunningApplication?
+            let isPinned: Bool
+            let windows: [CatalogWindow]
+        }
 
-            result.append(
-                AppItemFactory.make(
-                    bundleIdentifier: bid,
-                    name: name,
-                    icon: icon,
-                    url: url,
-                    isRunning: runningMatch != nil,
-                    isActive: frontID == bid,
+        var entries: [AppEntry] = []
+        var seen = Set<String>()
+        seen.reserveCapacity(pinned.count + running.count)
+
+        for bid in pinned {
+            seen.insert(bid)
+            entries.append(
+                AppEntry(
+                    bid: bid,
+                    running: runningByID[bid],
                     isPinned: true,
-                    processIdentifier: runningMatch?.processIdentifier
+                    windows: catalog.windows(for: bid)
                 )
             )
         }
-
         for app in running {
             guard let bid = app.bundleIdentifier, !seen.contains(bid) else { continue }
             seen.insert(bid)
-            result.append(
-                AppItemFactory.make(
-                    bundleIdentifier: bid,
-                    name: app.localizedName ?? bid,
-                    icon: app.icon,
-                    url: app.bundleURL,
-                    isRunning: true,
-                    isActive: frontID == bid,
+            entries.append(
+                AppEntry(
+                    bid: bid,
+                    running: app,
                     isPinned: false,
-                    processIdentifier: app.processIdentifier
+                    windows: catalog.windows(for: bid)
                 )
             )
         }
 
-        let signature = result.map {
-            "\($0.bundleIdentifier):\($0.isRunning ? 1 : 0)\($0.isActive ? 1 : 0)\($0.isPinned ? 1 : 0)"
-        }.joined(separator: ",")
+        let grouped = shouldGroup(windowCounts: entries.map(\.windows.count))
+
+        var signatureParts: [String] = []
+        signatureParts.reserveCapacity(entries.count)
+        for entry in entries {
+            let badge = showBadges ? catalog.badges[entry.bid] ?? 0 : 0
+            let countShown = (showCount && grouped && entry.windows.count > 1 && badge == 0) ? 1 : 0
+            let progress = Int((catalog.progress[entry.bid] ?? -1) * 100)
+            let hung = entry.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
+            let active = frontID == entry.bid ? 1 : 0
+            let windowPart = grouped
+                ? "g\(entry.windows.count)"
+                : entry.windows.map { "\($0.windowID):\($0.title)" }.joined(separator: "+")
+            signatureParts.append(
+                "\(entry.bid):\(entry.running == nil ? 0 : 1)\(active)\(entry.isPinned ? 1 : 0)|\(windowPart)|\(badge)|\(countShown)|\(progress)|\(hung ? 1 : 0)|\(grouped ? 1 : 0)"
+            )
+        }
+        let signature = signatureParts.joined(separator: ",") + "@\(Int(appStripAvailableWidth))"
         guard signature != lastItemsSignature else { return }
         lastItemsSignature = signature
+
+        var result: [TaskbarAppItem] = []
+        result.reserveCapacity(grouped ? entries.count : entries.reduce(0) { $0 + max($1.windows.count, 1) })
+
+        for entry in entries {
+            let url = entry.running?.bundleURL ?? AppIconCache.url(forBundleID: entry.bid)
+            let name = AppIconCache.displayName(
+                forBundleID: entry.bid,
+                url: url,
+                runningName: entry.running?.localizedName
+            )
+            let icon = AppIconCache.icon(
+                forBundleID: entry.bid,
+                url: url,
+                fallback: entry.running?.icon,
+                size: 64
+            )
+            let unread = showBadges ? catalog.badges[entry.bid] : nil
+            let progress = catalog.progress[entry.bid]
+            let hung = entry.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
+            let countBadge = (showCount && grouped && entry.windows.count > 1 && unread == nil) ? entry.windows.count : nil
+            let displayedBadge = unread ?? countBadge
+            let badgeIsUnread = unread != nil
+
+            if !grouped, !entry.windows.isEmpty {
+                for (index, window) in entry.windows.enumerated() {
+                    result.append(
+                        AppItemFactory.make(
+                            bundleIdentifier: entry.bid,
+                            name: name,
+                            icon: icon,
+                            url: url,
+                            isRunning: true,
+                            isActive: frontID == entry.bid && (frontWindowID == window.windowID || (frontWindowID == nil && index == 0)),
+                            isPinned: entry.isPinned,
+                            processIdentifier: window.pid,
+                            windowID: window.windowID,
+                            windowTitle: window.displayTitle(index: index),
+                            windowCount: entry.windows.count,
+                            badge: index == 0 ? displayedBadge : nil,
+                            badgeIsUnread: index == 0 && badgeIsUnread,
+                            progress: index == 0 ? progress : nil,
+                            isUnresponsive: hung,
+                            isGrouped: false
+                        )
+                    )
+                }
+            } else {
+                result.append(
+                    AppItemFactory.make(
+                        bundleIdentifier: entry.bid,
+                        name: name,
+                        icon: icon,
+                        url: url,
+                        isRunning: entry.running != nil,
+                        isActive: frontID == entry.bid,
+                        isPinned: entry.isPinned,
+                        processIdentifier: entry.running?.processIdentifier,
+                        windowCount: entry.windows.count,
+                        badge: displayedBadge,
+                        badgeIsUnread: badgeIsUnread,
+                        progress: progress,
+                        isUnresponsive: hung,
+                        isGrouped: true
+                    )
+                )
+            }
+        }
+
         items = result
     }
 
+    private func shouldGroup(windowCounts: [Int]) -> Bool {
+        switch appSettings.windowGrouping {
+        case .always:
+            return true
+        case .never:
+            return false
+        case .automatic:
+            guard appStripAvailableWidth > 40 else { return true }
+            let tiles = windowCounts.reduce(0) { $0 + max($1, 1) }
+            let needed = CGFloat(tiles) * (TaskbarMetrics.appButtonWidth + 2)
+            return needed > appStripAvailableWidth
+        }
+    }
+
     func select(_ item: TaskbarAppItem) {
+        if item.isGrouped, item.isRunning, item.windowCount >= 2 {
+            if isWindowListOpen, windowListBundleID == item.bundleIdentifier {
+                closeWindowList()
+            } else {
+                closeOverlays(includingWindowList: false)
+                openWindowList(item)
+            }
+            return
+        }
         closeOverlays()
         appMonitor.activateOrLaunch(item: item)
+    }
+
+    func openWindowList(_ item: TaskbarAppItem) {
+        windowListBundleID = item.bundleIdentifier
+        windowListAppName = item.name
+        windowListIcon = item.icon
+        windowListAnchorX = NSEvent.mouseLocation.x
+        isWindowListOpen = true
+    }
+
+    func closeWindowList() {
+        isWindowListOpen = false
+        windowListBundleID = nil
+    }
+
+    func pickWindow(_ window: CatalogWindow) {
+        closeOverlays()
+        appMonitor.raise(window: window)
+    }
+
+    func closeWindow(_ item: TaskbarAppItem) {
+        appMonitor.closeWindow(item)
     }
 
     func toggleStartMenu() {
@@ -196,6 +359,7 @@ final class TaskbarViewModel: ObservableObject {
         isModifierKeysOpen = false
         isCalendarOpen = false
         isSettingsOpen = false
+        closeWindowList()
         showsAllApps = false
         startMenuCatalog.selectedCategory = nil
         if !startMenuCatalog.searchText.isEmpty {
@@ -227,13 +391,14 @@ final class TaskbarViewModel: ObservableObject {
     func toggleCalendarPreview() {
         isCalendarOpen.toggle()
         if isCalendarOpen {
-            isStartMenuOpen = false
-            showsAllApps = false
-            isModifierKeysOpen = false
-            isSettingsOpen = false
-            startMenuCatalog.selectedCategory = nil
-            startMenuCatalog.searchText = ""
-            calendarStore.prepare()
+        isStartMenuOpen = false
+        showsAllApps = false
+        isModifierKeysOpen = false
+        isSettingsOpen = false
+        closeWindowList()
+        startMenuCatalog.selectedCategory = nil
+        startMenuCatalog.searchText = ""
+        calendarStore.prepare()
             calendarStore.load(month: Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: Date())) ?? Date())
             weatherStore.refreshIfNeeded()
             isCalendarAgendaExpanded = false
@@ -259,6 +424,7 @@ final class TaskbarViewModel: ObservableObject {
         showsAllApps = false
         isCalendarOpen = false
         isSettingsOpen = false
+        closeWindowList()
         startMenuCatalog.searchText = ""
         isModifierKeysOpen = true
         modifierKeyRemapper.reapply()
@@ -273,6 +439,7 @@ final class TaskbarViewModel: ObservableObject {
         showsAllApps = false
         isCalendarOpen = false
         isModifierKeysOpen = false
+        closeWindowList()
         startMenuCatalog.searchText = ""
         isSettingsOpen = true
     }
@@ -282,12 +449,15 @@ final class TaskbarViewModel: ObservableObject {
         isSettingsOpen = false
     }
 
-    func closeOverlays() {
+    func closeOverlays(includingWindowList: Bool = true) {
         isStartMenuOpen = false
         isModifierKeysOpen = false
         isCalendarOpen = false
         isSettingsOpen = false
         isCalendarAgendaExpanded = false
+        if includingWindowList {
+            closeWindowList()
+        }
         appSettings.isRecordingHotkey = false
         showsAllApps = false
         startMenuCatalog.selectedCategory = nil
@@ -295,7 +465,7 @@ final class TaskbarViewModel: ObservableObject {
     }
 
     var hasOpenOverlay: Bool {
-        isStartMenuOpen || isModifierKeysOpen || isCalendarOpen || isSettingsOpen || isCalendarAgendaExpanded
+        isStartMenuOpen || isModifierKeysOpen || isCalendarOpen || isSettingsOpen || isCalendarAgendaExpanded || isWindowListOpen
     }
 
     func requestCalendarShift(_ delta: Int) {

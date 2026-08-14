@@ -2,6 +2,30 @@ import AppKit
 import Combine
 import Foundation
 
+enum WindowGrouping: String, CaseIterable, Identifiable {
+    case automatic
+    case always
+    case never
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: return "自动"
+        case .always: return "总是"
+        case .never: return "从不"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .automatic: return "栏上放得下就每个窗口一格"
+        case .always: return "同一应用合并为一格"
+        case .never: return "每个窗口一格"
+        }
+    }
+}
+
 enum AppSettingKey {
     static let launchAtLogin = "launchAtLogin"
     static let hideSystemDock = "hideSystemDock"
@@ -12,6 +36,11 @@ enum AppSettingKey {
     static let calendarHotkey = "calendarHotkey"
     static let avoidOverlappingWindows = "avoidOverlappingWindows"
     static let calendarExpanded = "calendarExpanded"
+    static let windowGrouping = "windowGrouping"
+    static let showWindowCount = "showWindowCount"
+    static let showBadges = "showBadges"
+    static let showDesktopFavorite = "showDesktopFavorite"
+    static let showTrashFavorite = "showTrashFavorite"
 }
 
 @MainActor
@@ -25,6 +54,11 @@ final class AppSettings: ObservableObject {
     @Published private(set) var calendarHotkey: HotkeyChord?
     @Published private(set) var avoidOverlappingWindows: Bool
     @Published private(set) var calendarExpanded: Bool
+    @Published private(set) var windowGrouping: WindowGrouping
+    @Published private(set) var showWindowCount: Bool
+    @Published private(set) var showBadges: Bool
+    @Published private(set) var showDesktopFavorite: Bool
+    @Published private(set) var showTrashFavorite: Bool
     @Published var isRecordingHotkey = false
     @Published private(set) var lastError: String?
 
@@ -47,6 +81,11 @@ final class AppSettings: ObservableObject {
         } else {
             calendarExpanded = defaults.bool(forKey: AppSettingKey.calendarExpanded)
         }
+        windowGrouping = WindowGrouping(rawValue: defaults.string(forKey: AppSettingKey.windowGrouping) ?? "") ?? .automatic
+        showWindowCount = defaults.object(forKey: AppSettingKey.showWindowCount) as? Bool ?? true
+        showBadges = defaults.object(forKey: AppSettingKey.showBadges) as? Bool ?? true
+        showDesktopFavorite = defaults.object(forKey: AppSettingKey.showDesktopFavorite) as? Bool ?? true
+        showTrashFavorite = defaults.object(forKey: AppSettingKey.showTrashFavorite) as? Bool ?? true
         defaults.set(launchAtLogin, forKey: AppSettingKey.launchAtLogin)
         TaskbarMetrics.size = barSize
     }
@@ -94,7 +133,7 @@ final class AppSettings: ObservableObject {
             launchAtLogin = enabled
             UserDefaults.standard.set(enabled, forKey: AppSettingKey.launchAtLogin)
             if enabled && LoginItemService.needsApproval {
-                lastError = "请在「系统设置 → 通用 → 登录项」中允许 TaskListBar。"
+                lastError = "请在「系统设置 → 通用 → 登录项」中允许 KeelBar。"
                 LoginItemService.openLoginItemsSettings()
             }
         } catch {
@@ -124,6 +163,31 @@ final class AppSettings: ObservableObject {
     func setCalendarExpanded(_ expanded: Bool) {
         calendarExpanded = expanded
         UserDefaults.standard.set(expanded, forKey: AppSettingKey.calendarExpanded)
+    }
+
+    func setWindowGrouping(_ grouping: WindowGrouping) {
+        windowGrouping = grouping
+        UserDefaults.standard.set(grouping.rawValue, forKey: AppSettingKey.windowGrouping)
+    }
+
+    func setShowWindowCount(_ enabled: Bool) {
+        showWindowCount = enabled
+        UserDefaults.standard.set(enabled, forKey: AppSettingKey.showWindowCount)
+    }
+
+    func setShowBadges(_ enabled: Bool) {
+        showBadges = enabled
+        UserDefaults.standard.set(enabled, forKey: AppSettingKey.showBadges)
+    }
+
+    func setShowDesktopFavorite(_ enabled: Bool) {
+        showDesktopFavorite = enabled
+        UserDefaults.standard.set(enabled, forKey: AppSettingKey.showDesktopFavorite)
+    }
+
+    func setShowTrashFavorite(_ enabled: Bool) {
+        showTrashFavorite = enabled
+        UserDefaults.standard.set(enabled, forKey: AppSettingKey.showTrashFavorite)
     }
 
     func setStartMenuHotkey(_ chord: HotkeyChord?) {

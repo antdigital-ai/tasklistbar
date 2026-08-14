@@ -62,7 +62,6 @@ final class CalendarStore: ObservableObject {
         refreshAuthorization()
         let year = calendar.component(.year, from: Date())
         seedArrangement(year: year)
-        refreshArrangement(year: year)
         if observer == nil {
             observer = NotificationCenter.default.addObserver(
                 forName: .EKEventStoreChanged,

@@ -34,7 +34,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.show()
 
             appMonitor.start()
-            startMenuCatalog.refresh(force: false)
             AppLog.info("任务栏已显示")
         }
     }

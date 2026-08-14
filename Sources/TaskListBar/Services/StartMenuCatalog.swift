@@ -6,9 +6,12 @@ struct StartMenuApp: Identifiable, Hashable {
     var id: String { bundleIdentifier }
     let bundleIdentifier: String
     let name: String
-    let icon: NSImage
     let url: URL
     let category: AppCategory
+
+    var icon: NSImage {
+        AppIconCache.icon(forFile: url.path, size: 48)
+    }
 }
 
 private struct CachedStartMenuApp: Codable, Equatable {
@@ -37,23 +40,19 @@ final class StartMenuCatalog: ObservableObject {
     private var scanTask: Task<Void, Never>?
     private var filterTask: Task<Void, Never>?
     private let cacheTTL: TimeInterval = 600
-    private let iconSize: CGFloat = 48
 
     var isSearching: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var cacheURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let dir = base.appendingPathComponent("TaskListBar", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("start-menu-apps-v2.json")
+        AppSupport.root.appendingPathComponent("start-menu-apps-v2.json")
     }
 
     init() {
         Task { [weak self] in
             await self?.restoreDiskCache()
+            self?.refresh(force: false)
         }
     }
 
@@ -69,11 +68,10 @@ final class StartMenuCatalog: ObservableObject {
 
         scanTask?.cancel()
         isLoading = apps.isEmpty
-        let iconSize = self.iconSize
 
         scanTask = Task { [weak self] in
             let discovered = await Task.detached(priority: .utility) {
-                Self.scanApplications(iconSize: iconSize)
+                Self.scanApplications()
             }.value
             guard !Task.isCancelled else { return }
 
@@ -130,7 +128,6 @@ final class StartMenuCatalog: ObservableObject {
 
     private func restoreDiskCache() async {
         let url = cacheURL
-        let iconSize = self.iconSize
         let restored = await Task.detached(priority: .utility) { () -> [StartMenuApp]? in
             guard let cached = Self.readDiskCache(from: url), !cached.isEmpty else { return nil }
             var apps: [StartMenuApp] = []
@@ -140,12 +137,10 @@ final class StartMenuCatalog: ObservableObject {
                 guard FileManager.default.fileExists(atPath: item.path) else { continue }
                 let category = AppCategory(rawValue: item.category ?? "")
                     ?? AppCategory.infer(bundleID: item.bundleIdentifier, name: item.name)
-                let icon = AppIconCache.icon(forFile: item.path, size: iconSize)
                 apps.append(
                     StartMenuApp(
                         bundleIdentifier: item.bundleIdentifier,
                         name: item.name,
-                        icon: icon,
                         url: pathURL,
                         category: category
                     )
@@ -205,7 +200,7 @@ final class StartMenuCatalog: ObservableObject {
         try? data.write(to: url, options: [.atomic])
     }
 
-    nonisolated private static func scanApplications(iconSize: CGFloat) -> [StartMenuApp] {
+    nonisolated private static func scanApplications() -> [StartMenuApp] {
         let directories = [
             "/Applications",
             "/System/Applications",
@@ -230,7 +225,7 @@ final class StartMenuCatalog: ObservableObject {
                 options: [.skipsHiddenFiles]
             ) {
                 for item in children where item.pathExtension == "app" {
-                    appendApp(at: item, seen: &seen, results: &results, iconSize: iconSize)
+                    appendApp(at: item, seen: &seen, results: &results)
                 }
             }
 
@@ -252,7 +247,7 @@ final class StartMenuCatalog: ObservableObject {
                         options: [.skipsHiddenFiles]
                     ) {
                         for item in nested where item.pathExtension == "app" {
-                            appendApp(at: item, seen: &seen, results: &results, iconSize: iconSize)
+                            appendApp(at: item, seen: &seen, results: &results)
                         }
                     }
                 }
@@ -265,8 +260,7 @@ final class StartMenuCatalog: ObservableObject {
     nonisolated private static func appendApp(
         at item: URL,
         seen: inout Set<String>,
-        results: inout [StartMenuApp],
-        iconSize: CGFloat
+        results: inout [StartMenuApp]
     ) {
         guard let bundle = Bundle(url: item),
               let bid = bundle.bundleIdentifier,
@@ -289,13 +283,10 @@ final class StartMenuCatalog: ObservableObject {
         if category == .other {
             category = AppCategory.infer(bundleID: bid, name: name)
         }
-        let icon = AppIconCache.icon(forFile: item.path, size: iconSize)
-
         results.append(
             StartMenuApp(
                 bundleIdentifier: bid,
                 name: name,
-                icon: icon,
                 url: item,
                 category: category
             )

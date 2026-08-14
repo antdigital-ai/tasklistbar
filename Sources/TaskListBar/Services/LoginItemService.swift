@@ -2,13 +2,18 @@ import Foundation
 import ServiceManagement
 
 enum LoginItemService {
-    static let agentLabel = "com.tasklistbar.app"
+    static let agentLabel = AppSupport.bundleID
+    private static let legacyAgentLabel = "com.tasklistbar.app"
 
     static var isEnabled: Bool {
         if SMAppService.mainApp.status == .enabled {
             return true
         }
+        let legacyURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+            .appendingPathComponent("\(legacyAgentLabel).plist")
         return FileManager.default.fileExists(atPath: launchAgentURL.path)
+            || FileManager.default.fileExists(atPath: legacyURL.path)
     }
 
     static var needsApproval: Bool {
@@ -38,6 +43,7 @@ enum LoginItemService {
     }
 
     private static func enable() throws {
+        removeLegacyLaunchAgent()
         if runningAsAppBundle {
             do {
                 try SMAppService.mainApp.register()
@@ -92,6 +98,16 @@ enum LoginItemService {
         let domain = "gui/\(getuid())"
         _ = runLaunchctl(["bootout", "\(domain)/\(agentLabel)"])
         try? FileManager.default.removeItem(at: launchAgentURL)
+        removeLegacyLaunchAgent()
+    }
+
+    private static func removeLegacyLaunchAgent() {
+        let domain = "gui/\(getuid())"
+        _ = runLaunchctl(["bootout", "\(domain)/\(legacyAgentLabel)"])
+        let legacyURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+            .appendingPathComponent("\(legacyAgentLabel).plist")
+        try? FileManager.default.removeItem(at: legacyURL)
     }
 
     @discardableResult

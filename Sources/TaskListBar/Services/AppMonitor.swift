@@ -9,50 +9,58 @@ final class AppMonitor: ObservableObject {
     @Published private(set) var runningApps: [NSRunningApplication] = []
     @Published private(set) var frontmostBundleID: String?
 
+    let windowCatalog = WindowCatalog()
+
     private var observers: [NSObjectProtocol] = []
+    private var cancellables = Set<AnyCancellable>()
     private var debounceTask: Task<Void, Never>?
-    private var windowPollTask: Task<Void, Never>?
     private var lastSignature: String = ""
 
     func start() {
-        refresh(immediate: true)
+        refreshFrontmost()
+        windowCatalog.$uiPIDs
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] pids in
+                self?.applyRunning(uiPIDs: pids)
+            }
+            .store(in: &cancellables)
+        windowCatalog.start()
 
         let workspace = NSWorkspace.shared.notificationCenter
-        // Focus + lifecycle + hide. Window open/close is covered by a light poll.
-        let names: [NSNotification.Name] = [
+        let runningNames: [NSNotification.Name] = [
             NSWorkspace.didLaunchApplicationNotification,
             NSWorkspace.didTerminateApplicationNotification,
-            NSWorkspace.didActivateApplicationNotification,
             NSWorkspace.didHideApplicationNotification,
             NSWorkspace.didUnhideApplicationNotification
         ]
-
-        for name in names {
-            let token = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        for name in runningNames {
+            observers.append(
+                workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.scheduleRunningRefresh()
+                    }
+                }
+            )
+        }
+        observers.append(
+            workspace.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
                 Task { @MainActor in
-                    self?.scheduleRefresh()
+                    self?.refreshFrontmost()
                 }
             }
-            observers.append(token)
-        }
-
-        windowPollTask?.cancel()
-        windowPollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    self?.refresh(immediate: true)
-                }
-            }
-        }
+        )
     }
 
     func stop() {
         debounceTask?.cancel()
         debounceTask = nil
-        windowPollTask?.cancel()
-        windowPollTask = nil
+        windowCatalog.stop()
+        cancellables.removeAll()
         let workspace = NSWorkspace.shared.notificationCenter
         for token in observers {
             workspace.removeObserver(token)
@@ -60,25 +68,33 @@ final class AppMonitor: ObservableObject {
         observers.removeAll()
     }
 
-    private func scheduleRefresh() {
+    private func scheduleRunningRefresh() {
         debounceTask?.cancel()
         debounceTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 80_000_000) // 80ms coalesce
+            try? await Task.sleep(nanoseconds: 80_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.refresh(immediate: true)
+                self?.refreshRunning()
             }
         }
     }
 
-    func refresh(immediate: Bool = true) {
-        _ = immediate
-        let uiPIDs = Self.pidsWithUIWindows()
+    func refreshFrontmost() {
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        guard front != frontmostBundleID else { return }
+        frontmostBundleID = front
+    }
+
+    func refreshRunning() {
+        applyRunning(uiPIDs: windowCatalog.uiPIDs)
+        windowCatalog.refresh()
+    }
+
+    private func applyRunning(uiPIDs: Set<pid_t>) {
         let apps = NSWorkspace.shared.runningApplications.filter { app in
             guard app.activationPolicy == .regular else { return false }
             guard let bid = app.bundleIdentifier else { return false }
             guard bid != AppItemFactory.ownBundleID else { return false }
-            // Skip background/agent processes that declare .regular but have no real UI.
             return uiPIDs.contains(app.processIdentifier)
         }
         .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
@@ -90,48 +106,23 @@ final class AppMonitor: ObservableObject {
         guard signature != lastSignature else { return }
         lastSignature = signature
         runningApps = apps
-        frontmostBundleID = front
-    }
-
-    /// Layer-0 windows large enough to count as real app UI (not 1×1 agents / menu crumbs).
-    private static func pidsWithUIWindows() -> Set<pid_t> {
-        guard let infoList = CGWindowListCopyWindowInfo(
-            [.excludeDesktopElements],
-            kCGNullWindowID
-        ) as? [[String: Any]] else {
-            return []
+        if front != frontmostBundleID {
+            frontmostBundleID = front
         }
-
-        var result = Set<pid_t>()
-        for info in infoList {
-            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t else { continue }
-            let layer = info[kCGWindowLayer as String] as? Int ?? 0
-            guard layer == 0 else { continue }
-
-            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
-            guard alpha > 0.05 else { continue }
-
-            if let bounds = info[kCGWindowBounds as String] as? [String: Any] {
-                let width = cgFloatValue(bounds["Width"])
-                let height = cgFloatValue(bounds["Height"])
-                // Tiny / off-screen agent windows should not keep an app in the taskbar.
-                if width < 50 || height < 50 { continue }
-            }
-
-            result.insert(pid)
-        }
-        return result
-    }
-
-    private static func cgFloatValue(_ raw: Any?) -> CGFloat {
-        if let number = raw as? NSNumber { return CGFloat(truncating: number) }
-        if let value = raw as? CGFloat { return value }
-        if let value = raw as? Double { return CGFloat(value) }
-        return 0
     }
 
     func activateOrLaunch(item: TaskbarAppItem) {
         if let running = resolvedRunning(for: item) {
+            if let windowID = item.windowID {
+                if item.isActive {
+                    if !WindowRaiser.minimize(pid: running.processIdentifier, windowID: windowID, title: item.windowTitle) {
+                        running.hide()
+                    }
+                    return
+                }
+                AppActivation.bringToFront(running, windowID: windowID, windowTitle: item.windowTitle)
+                return
+            }
             if item.isActive || running.isActive {
                 running.hide()
                 return
@@ -174,10 +165,36 @@ final class AppMonitor: ObservableObject {
             .filter { $0.bundleIdentifier == bundleIdentifier }
             .forEach { $0.forceTerminate() }
     }
+
+    func raise(window: CatalogWindow) {
+        guard let running = NSRunningApplication(processIdentifier: window.pid), !running.isTerminated else { return }
+        AppActivation.bringToFront(running, windowID: window.windowID, windowTitle: window.title)
+    }
+
+    func closeWindow(_ item: TaskbarAppItem) {
+        guard let windowID = item.windowID, let pid = item.processIdentifier else { return }
+        WindowRaiser.close(pid: pid, windowID: windowID, title: item.windowTitle)
+        windowCatalog.refresh()
+    }
 }
 
 enum AppActivation {
-    static func bringToFront(_ running: NSRunningApplication, allowOpenFallback: Bool = true) {
+    private static let genericSchemes: Set<String> = [
+        "http", "https", "file", "mailto", "ftp", "tel", "sms", "webcal", "afp", "smb", "cifs"
+    ]
+    private static let rejectedSchemeParts = [
+        "license", "oauth", "callback", "uninstall", "update", "auth", "prefs", "feed", "helper"
+    ]
+    private static let weakTokens: Set<String> = [
+        "com", "org", "net", "mac", "app", "ios", "osx", "www", "desktop", "exclusive", "work"
+    ]
+
+    static func bringToFront(
+        _ running: NSRunningApplication,
+        allowOpenFallback: Bool = true,
+        windowID: CGWindowID? = nil,
+        windowTitle: String? = nil
+    ) {
         guard !running.isTerminated else { return }
         running.unhide()
 
@@ -186,9 +203,14 @@ enum AppActivation {
             _ = running.activate()
         }
         running.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
-        raiseWindows(of: running)
+        if let windowID {
+            WindowRaiser.raise(pid: running.processIdentifier, windowID: windowID, title: windowTitle)
+        } else {
+            raiseWindows(of: running)
+        }
 
-        if isAgentApp(running), let url = customActivationURL(for: running) {
+        let needsURL = isAgentApp(running) || !running.isActive
+        if needsURL, let url = customActivationURL(for: running) {
             NSWorkspace.shared.open(url)
             return
         }
@@ -248,23 +270,48 @@ enum AppActivation {
               let types = bundle.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]]
         else { return nil }
 
-        let blocked: Set<String> = ["http", "https", "file", "mailto", "ftp", "tel", "sms"]
         let schemes = types
             .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
             .map { $0.lowercased() }
-            .filter { !blocked.contains($0) && !$0.isEmpty }
+            .filter { isActivationScheme($0) }
         guard !schemes.isEmpty else { return nil }
 
-        let tokens = Set((running.bundleIdentifier ?? "").lowercased().split(separator: ".").map(String.init))
-        let scheme = schemes.max { a, b in
-            score(scheme: a, tokens: tokens) < score(scheme: b, tokens: tokens)
-        } ?? schemes[0]
-        return URL(string: "\(scheme):")
+        let tokens = identityTokens(for: running, bundle: bundle)
+        let ranked = schemes.map { ($0, score(scheme: $0, tokens: tokens)) }
+        guard let best = ranked.max(by: { $0.1 < $1.1 }), best.1 >= 3 else { return nil }
+        return URL(string: "\(best.0):")
+    }
+
+    private static func isActivationScheme(_ scheme: String) -> Bool {
+        guard !scheme.isEmpty, !genericSchemes.contains(scheme) else { return false }
+        return !rejectedSchemeParts.contains { scheme.contains($0) }
+    }
+
+    private static func identityTokens(for running: NSRunningApplication, bundle: Bundle) -> Set<String> {
+        var raw: [String] = []
+        if let bid = running.bundleIdentifier { raw.append(bid) }
+        if let name = running.localizedName { raw.append(name) }
+        if let name = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String { raw.append(name) }
+        if let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String { raw.append(name) }
+        if let name = bundle.object(forInfoDictionaryKey: "CFBundleExecutable") as? String { raw.append(name) }
+
+        var tokens = Set<String>()
+        for value in raw {
+            let lower = value.lowercased()
+            for piece in lower.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                let token = String(piece)
+                guard token.count >= 4, !weakTokens.contains(token) else { continue }
+                tokens.insert(token)
+            }
+        }
+        return tokens
     }
 
     private static func score(scheme: String, tokens: Set<String>) -> Int {
-        if tokens.contains(scheme) { return 3 }
-        if tokens.contains(where: { $0.contains(scheme) || scheme.contains($0) }) { return 2 }
+        let compact = scheme.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined()
+        if tokens.contains(scheme) || tokens.contains(compact) { return 3 }
+        if tokens.contains(where: { $0.count >= 4 && (scheme == $0 || compact == $0) }) { return 3 }
+        if tokens.contains(where: { $0.count >= 4 && (scheme.contains($0) || $0.contains(scheme)) }) { return 2 }
         return 1
     }
 }

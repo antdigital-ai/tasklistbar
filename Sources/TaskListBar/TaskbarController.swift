@@ -13,6 +13,7 @@ final class TaskbarController: NSObject {
     private var modifierKeysPanel: NSPanel?
     private var calendarPanel: NSPanel?
     private var settingsPanel: NSPanel?
+    private var windowListPanel: NSPanel?
     private var statusItem: NSStatusItem?
     private var screenObserver: NSObjectProtocol?
     private var localMouseMonitor: Any?
@@ -38,7 +39,8 @@ final class TaskbarController: NSObject {
             batteryMonitor: BatteryMonitor(),
             spacesMonitor: SpacesMonitor(),
             bluetoothMonitor: BluetoothMonitor(),
-            volumeMonitor: VolumeMonitor()
+            volumeMonitor: VolumeMonitor(),
+            favoritesStore: FavoritesStore()
         )
         super.init()
     }
@@ -96,6 +98,13 @@ final class TaskbarController: NSObject {
                 self?.syncSettingsVisibility()
             }
             .store(in: &cancellables)
+
+        viewModel.$isWindowListOpen
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncWindowListVisibility()
+            }
+            .store(in: &cancellables)
     }
 
     /// Build the start-menu panel ahead of the first click so opening feels instant.
@@ -122,11 +131,11 @@ final class TaskbarController: NSObject {
         if let button = item.button {
             let image = NSImage(
                 systemSymbolName: "menubar.dock.rectangle",
-                accessibilityDescription: "TaskListBar"
+                accessibilityDescription: "KeelBar"
             )
             image?.isTemplate = true
             button.image = image
-            button.toolTip = "TaskListBar"
+            button.toolTip = "KeelBar"
         }
 
         let menu = NSMenu()
@@ -170,12 +179,26 @@ final class TaskbarController: NSObject {
         let sizeItem = statusItem("任务栏大小", symbol: "arrow.up.left.and.arrow.down.right", action: nil)
         sizeItem.submenu = sizeMenu
         menu.addItem(sizeItem)
+
+        let groupingMenu = NSMenu()
+        for grouping in WindowGrouping.allCases {
+            let option = statusItem(
+                grouping.title,
+                symbol: "rectangle.split.3x1",
+                action: #selector(statusSetGrouping(_:))
+            )
+            option.representedObject = grouping.rawValue
+            groupingMenu.addItem(option)
+        }
+        let groupingItem = statusItem("窗口分组", symbol: "rectangle.split.3x1", action: nil)
+        groupingItem.submenu = groupingMenu
+        menu.addItem(groupingItem)
         menu.addItem(.separator())
         menu.addItem(statusItem("刷新开始菜单缓存", symbol: "arrow.clockwise", action: #selector(statusRefreshStartMenu)))
         menu.addItem(statusItem("显示任务栏", symbol: "rectangle.bottomhalf.inset.filled", action: #selector(statusShowTaskbar)))
         menu.addItem(statusItem("打开日志文件夹", symbol: "folder", action: #selector(statusOpenLogs)))
         menu.addItem(.separator())
-        menu.addItem(statusItem("退出 TaskListBar", symbol: "power", action: #selector(statusQuit), key: "q"))
+        menu.addItem(statusItem("退出 KeelBar", symbol: "power", action: #selector(statusQuit), key: "q"))
         statusItem = item
         item.menu = menu
     }
@@ -225,6 +248,13 @@ final class TaskbarController: NSObject {
               let size = TaskbarSize(rawValue: raw)
         else { return }
         viewModel.appSettings.setBarSize(size)
+    }
+
+    @objc private func statusSetGrouping(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let grouping = WindowGrouping(rawValue: raw)
+        else { return }
+        viewModel.appSettings.setWindowGrouping(grouping)
     }
 
     @objc private func statusRefreshStartMenu() {
@@ -415,6 +445,38 @@ final class TaskbarController: NSObject {
         settingsPanel = panel
     }
 
+    private func createWindowListPanelIfNeeded() {
+        if windowListPanel != nil { return }
+
+        let glass = GlassPanelFactory.wrap(
+            ThemedRoot(settings: viewModel.appSettings) {
+                WindowListView(
+                    viewModel: viewModel,
+                    catalog: viewModel.appMonitor.windowCatalog
+                )
+            },
+            cornerRadius: 12
+        )
+
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: WindowListView.panelWidth, height: 80),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.contentView = glass
+
+        windowListPanel = panel
+    }
+
     private func layoutPanels() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         panel?.setFrame(taskbarFrame(on: screen), display: true)
@@ -471,6 +533,9 @@ final class TaskbarController: NSObject {
                 height: 580
             ))
         }
+        if let list = windowListPanel {
+            apply(list, windowListTargetFrame())
+        }
     }
 
     private func syncStartMenuVisibility() {
@@ -519,6 +584,23 @@ final class TaskbarController: NSObject {
                 calendarPanel,
                 show: false,
                 target: calendarTargetFrame()
+            )
+        }
+    }
+
+    private func syncWindowListVisibility() {
+        if viewModel.isWindowListOpen {
+            createWindowListPanelIfNeeded()
+            animatePanel(
+                windowListPanel,
+                show: true,
+                target: windowListTargetFrame()
+            )
+        } else {
+            animatePanel(
+                windowListPanel,
+                show: false,
+                target: windowListTargetFrame()
             )
         }
     }
@@ -804,6 +886,22 @@ final class TaskbarController: NSObject {
         }
     }
 
+    private func windowListTargetFrame() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let frame = screen.frame
+        let count = viewModel.windowListBundleID.map { viewModel.appMonitor.windowCatalog.windows(for: $0).count } ?? 1
+        let width = WindowListView.panelWidth
+        let height = WindowListView.panelHeight(count: count)
+        var x = viewModel.windowListAnchorX - width / 2
+        x = max(frame.minX + 8, min(x, frame.maxX - width - 8))
+        return NSRect(
+            x: x,
+            y: frame.minY + Self.barHeight + 8,
+            width: width,
+            height: height
+        )
+    }
+
     private func settingsTargetFrame() -> NSRect {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
         let frame = screen.frame
@@ -1013,6 +1111,7 @@ final class TaskbarController: NSObject {
     }
 
     private func handleMouseDown() {
+        guard viewModel.hasOpenOverlay else { return }
         let location = NSEvent.mouseLocation
         let inBar = panel?.frame.contains(location) == true
 
@@ -1041,6 +1140,13 @@ final class TaskbarController: NSObject {
             let inSettings = settingsPanel?.frame.contains(location) == true
             if !inSettings && !inBar {
                 viewModel.closeSettings()
+            }
+        }
+
+        if viewModel.isWindowListOpen {
+            let inList = windowListPanel?.frame.contains(location) == true
+            if !inList && !inBar {
+                viewModel.closeWindowList()
             }
         }
     }
@@ -1139,6 +1245,12 @@ extension TaskbarController: NSMenuDelegate {
             for item in sizeItem.submenu?.items ?? [] {
                 let raw = item.representedObject as? String
                 item.state = raw == viewModel.appSettings.barSize.rawValue ? .on : .off
+            }
+        }
+        if let groupingItem = menu.items.first(where: { $0.submenu != nil && $0.title == "窗口分组" }) {
+            for item in groupingItem.submenu?.items ?? [] {
+                let raw = item.representedObject as? String
+                item.state = raw == viewModel.appSettings.windowGrouping.rawValue ? .on : .off
             }
         }
     }

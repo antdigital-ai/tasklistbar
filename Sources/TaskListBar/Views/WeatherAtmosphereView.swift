@@ -53,7 +53,7 @@ struct WeatherAtmosphereView: View {
         .task(id: isActive) {
             guard isActive else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 90_000_000)
+                try? await Task.sleep(nanoseconds: 200_000_000)
                 time = Date().timeIntervalSinceReferenceDate
             }
         }

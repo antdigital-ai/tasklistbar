@@ -1,4 +1,4 @@
-# TaskListBar
+# KeelBar
 
 macOS 底部任务栏（纯 Swift：AppKit + SwiftUI），交互参考本地 [uBar](https://brawer.ca/ubar/) 与 Windows 任务栏。
 
@@ -20,9 +20,9 @@ macOS 底部任务栏（纯 Swift：AppKit + SwiftUI），交互参考本地 [uB
 ## 构建与运行
 
 ```bash
-./Scripts/build.sh          # debug → dist/TaskListBar.app
+./Scripts/build.sh          # debug → dist/KeelBar.app
 ./Scripts/build.sh release  # release
-open dist/TaskListBar.app
+open dist/KeelBar.app
 ```
 
 建议：

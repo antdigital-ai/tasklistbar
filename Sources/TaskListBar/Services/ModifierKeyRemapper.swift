@@ -72,7 +72,7 @@ final class ModifierKeyRemapper: ObservableObject {
     }
 
     private func apply(_ config: ModifierKeyConfiguration) {
-        // Non-default mappings are owned by TaskListBar via hidutil. Clear System Settings
+        // Non-default mappings are owned by KeelBar via hidutil. Clear System Settings
         // mappings first so ⌃/⌘ are not remapped twice.
         if !config.isIdentity {
             clearSystemModifierMappings()
