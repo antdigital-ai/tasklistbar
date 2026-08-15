@@ -10,11 +10,17 @@ struct AppSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().opacity(0.25)
+            Divider().opacity(0.2)
             content
-            footer
+            if let error = settings.lastError {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.4))
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onDisappear {
             settings.isRecordingHotkey = false
         }
@@ -22,454 +28,243 @@ struct AppSettingsView: View {
 
     private var header: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("设置")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.primary)
-                Text("开机启动、快捷键、外观、窗口分组与收藏。")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.primary.opacity(0.55))
-            }
+            Text("设置")
+                .font(.system(size: 15, weight: .semibold))
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.primary.opacity(0.8))
-                    .frame(width: 28, height: 28)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.primary.opacity(0.7))
+                    .frame(width: 20, height: 20)
                     .background(Circle().fill(Color.primary.opacity(0.1)))
             }
             .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-            appearancePicker
-            sizePicker
-            accentPicker
-            groupingPicker
-
-            VStack(spacing: 0) {
-                SettingsToggleRow(
-                    title: "开机时启动",
-                    subtitle: "登录后自动打开 KeelBar",
-                    systemImage: "power",
-                    isOn: Binding(
-                        get: { settings.launchAtLogin },
-                        set: { settings.setLaunchAtLogin($0) }
-                    )
-                )
-                Divider().opacity(0.18)
-                SettingsToggleRow(
-                    title: "隐藏系统 Dock",
-                    subtitle: "避免挡住底部任务栏；退出后会恢复",
-                    systemImage: "menubar.dock.rectangle",
-                    isOn: Binding(
-                        get: { settings.hideDock },
-                        set: { settings.setHideDock($0) }
-                    )
-                )
-                Divider().opacity(0.18)
-                SettingsToggleRow(
-                    title: "最大化时避开底栏",
-                    subtitle: "放大窗口后上移，避免被任务栏挡住",
-                    systemImage: "rectangle.bottomhalf.inset.filled",
-                    isOn: Binding(
-                        get: { settings.avoidOverlappingWindows },
-                        set: { settings.setAvoidOverlappingWindows($0) }
-                    )
-                )
-                Divider().opacity(0.18)
-                SettingsToggleRow(
-                    title: "显示窗口数",
-                    subtitle: "合并格上显示该应用的窗口数量",
-                    systemImage: "number",
-                    isOn: Binding(
-                        get: { settings.showWindowCount },
-                        set: { settings.setShowWindowCount($0) }
-                    )
-                )
-                Divider().opacity(0.18)
-                SettingsToggleRow(
-                    title: "显示角标",
-                    subtitle: "从 Dock 读取未读数，红点显示在图标上",
-                    systemImage: "app.badge",
-                    isOn: Binding(
-                        get: { settings.showBadges },
-                        set: { settings.setShowBadges($0) }
-                    )
-                )
-                Divider().opacity(0.18)
-                SettingsToggleRow(
-                    title: "收藏桌面",
-                    subtitle: "在开始按钮右侧显示桌面",
-                    systemImage: "desktopcomputer",
-                    isOn: Binding(
-                        get: { settings.showDesktopFavorite },
-                        set: { settings.setShowDesktopFavorite($0) }
-                    )
-                )
-                Divider().opacity(0.18)
-                SettingsToggleRow(
-                    title: "收藏废纸篓",
-                    subtitle: "显示废纸篓；右键可清倒",
-                    systemImage: "trash",
-                    isOn: Binding(
-                        get: { settings.showTrashFavorite },
-                        set: { settings.setShowTrashFavorite($0) }
-                    )
-                )
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-
-            hotkeySection
-
-            Button(action: onOpenModifierKeys) {
-                HStack(spacing: 12) {
-                    Image(systemName: "keyboard")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(0.85))
-                        .frame(width: 28, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(Color.primary.opacity(0.08))
-                        )
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("修饰键")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.primary.opacity(0.92))
-                        Text("为外置键盘调整 Control / Command")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.primary.opacity(0.45))
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(0.35))
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-                )
-            }
-            .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.98))
-
-            Text("隐藏 Dock 会打开自动隐藏并拉长唤出延迟。最大化避开底栏需要在「系统设置 → 隐私与安全性 → 辅助功能」中允许 KeelBar。")
-                .font(.system(size: 11))
-                .foregroundStyle(.primary.opacity(0.45))
-                .fixedSize(horizontal: false, vertical: true)
-
-            logSection
-
-            if let error = settings.lastError {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.4))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
-        }
-    }
-
-    private var hotkeySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("快捷键")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.55))
-
-            VStack(spacing: 0) {
-                HotkeyRecorderRow(
-                    title: "开始菜单",
-                    subtitle: "在任意应用中打开或关闭",
-                    systemImage: "square.grid.2x2",
-                    chord: settings.startMenuHotkey,
-                    isBlocked: settings.isRecordingHotkey,
-                    onRecord: { settings.isRecordingHotkey = $0 },
-                    onSet: { settings.setStartMenuHotkey($0) }
-                )
-                Divider().opacity(0.18)
-                HotkeyRecorderRow(
-                    title: "日历与天气",
-                    subtitle: "打开任务栏右侧预览",
-                    systemImage: "calendar",
-                    chord: settings.calendarHotkey,
-                    isBlocked: settings.isRecordingHotkey,
-                    onRecord: { settings.isRecordingHotkey = $0 },
-                    onSet: { settings.setCalendarHotkey($0) }
-                )
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-
-            Text("点右侧组合键后按下新快捷键。Esc 取消，Delete 清除。Esc 也可关闭已打开的面板。")
-                .font(.system(size: 11))
-                .foregroundStyle(.primary.opacity(0.45))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var logSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("日志")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.55))
-
-            HStack(spacing: 8) {
-                Button(action: AppLog.openInFinder) {
-                    Label("打开日志文件夹", systemImage: "folder")
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.primary.opacity(0.06))
-                        )
-                }
-                .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.98))
-
-                Button(action: AppLog.copyTodayToPasteboard) {
-                    Label("复制今天", systemImage: "doc.on.clipboard")
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.primary.opacity(0.06))
-                        )
-                }
-                .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.98))
-            }
-            .foregroundStyle(.primary.opacity(0.85))
-
-            Text("日志保存在「应用程序支持/KeelBar/logs」，默认保留 7 天。")
-                .font(.system(size: 11))
-                .foregroundStyle(.primary.opacity(0.45))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var appearancePicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("外观")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.55))
-            HStack(spacing: 8) {
-                ForEach(AppAppearance.allCases) { appearance in
-                    Button {
-                        settings.setAppearance(appearance)
-                    } label: {
-                        VStack(spacing: 4) {
-                            Image(systemName: appearance.systemImage)
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(appearance.title)
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .foregroundStyle(settings.appearance == appearance ? settings.accent.onAccent : .primary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(settings.appearance == appearance ? settings.accent.color.opacity(0.9) : Color.primary.opacity(0.06))
-                        )
-                    }
-                    .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
-                    .help(appearance.subtitle)
-                }
-            }
-        }
-    }
-
-    private var sizePicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("任务栏大小")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.55))
-            HStack(spacing: 8) {
-                ForEach(TaskbarSize.allCases) { size in
-                    Button {
-                        settings.setBarSize(size)
-                    } label: {
-                        VStack(spacing: 6) {
-                            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                                .fill(settings.barSize == size ? settings.accent.onAccent.opacity(0.92) : Color.primary.opacity(0.35))
-                                .frame(width: 22, height: size.previewBarHeight)
-                            Text(size.title)
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .foregroundStyle(settings.barSize == size ? settings.accent.onAccent : .primary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(settings.barSize == size ? settings.accent.color.opacity(0.9) : Color.primary.opacity(0.06))
-                        )
-                    }
-                    .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
-                    .help(size.subtitle)
-                }
-            }
-        }
-    }
-
-    private var groupingPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("窗口分组")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.55))
-            HStack(spacing: 8) {
-                ForEach(WindowGrouping.allCases) { grouping in
-                    Button {
-                        settings.setWindowGrouping(grouping)
-                    } label: {
-                        VStack(spacing: 4) {
-                            Text(grouping.title)
-                                .font(.system(size: 12, weight: .semibold))
-                            Text(grouping.subtitle)
-                                .font(.system(size: 9))
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.85)
-                        }
-                        .foregroundStyle(settings.windowGrouping == grouping ? settings.accent.onAccent : .primary)
-                        .frame(maxWidth: .infinity, minHeight: 52)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(settings.windowGrouping == grouping ? settings.accent.color.opacity(0.9) : Color.primary.opacity(0.06))
-                        )
-                    }
-                    .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
-                    .help(grouping.subtitle)
-                }
-            }
-        }
-    }
-
-    private var accentPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("强调色")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.55))
-            HStack(spacing: 10) {
-                ForEach(AppAccent.allCases) { accent in
-                    Button {
-                        settings.setAccent(accent)
-                    } label: {
-                        ZStack {
-                            Circle()
-                                .fill(accent.color)
-                                .frame(width: 22, height: 22)
-                            if settings.accent == accent {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundStyle(accent.onAccent)
+                settingsGroup {
+                    SettingsChoiceRow(title: "外观") {
+                        ForEach(AppAppearance.allCases) { appearance in
+                            SettingsSegment(
+                                title: appearance.title,
+                                selected: settings.appearance == appearance
+                            ) {
+                                settings.setAppearance(appearance)
                             }
                         }
                     }
-                    .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
-                    .help(accent.title)
+                    SettingsChoiceRow(title: "大小") {
+                        ForEach(TaskbarSize.allCases) { size in
+                            SettingsSegment(
+                                title: size.title,
+                                selected: settings.barSize == size
+                            ) {
+                                settings.setBarSize(size)
+                            }
+                        }
+                    }
+                    SettingsChoiceRow(title: "分组") {
+                        ForEach(WindowGrouping.allCases) { grouping in
+                            SettingsSegment(
+                                title: grouping.title,
+                                selected: settings.windowGrouping == grouping
+                            ) {
+                                settings.setWindowGrouping(grouping)
+                            }
+                        }
+                    }
+                    SettingsChoiceRow(title: "强调色") {
+                        ForEach(AppAccent.allCases) { item in
+                            Button {
+                                settings.setAccent(item)
+                            } label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(item.color)
+                                        .frame(width: 14, height: 14)
+                                    if settings.accent == item {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 7, weight: .bold))
+                                            .foregroundStyle(item.onAccent)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .help(item.title)
+                        }
+                    }
                 }
-                Spacer(minLength: 0)
+
+                settingsGroup {
+                    SettingsToggleRow(
+                        title: "开机时启动",
+                        isOn: Binding(
+                            get: { settings.launchAtLogin },
+                            set: { settings.setLaunchAtLogin($0) }
+                        )
+                    )
+                    SettingsToggleRow(
+                        title: "隐藏系统 Dock",
+                        isOn: Binding(
+                            get: { settings.hideDock },
+                            set: { settings.setHideDock($0) }
+                        )
+                    )
+                    SettingsToggleRow(
+                        title: "最大化时避开底栏",
+                        isOn: Binding(
+                            get: { settings.avoidOverlappingWindows },
+                            set: { settings.setAvoidOverlappingWindows($0) }
+                        )
+                    )
+                    SettingsToggleRow(
+                        title: "显示角标",
+                        isOn: Binding(
+                            get: { settings.showBadges },
+                            set: { settings.setShowBadges($0) }
+                        )
+                    )
+                    SettingsToggleRow(
+                        title: "收藏桌面",
+                        isOn: Binding(
+                            get: { settings.showDesktopFavorite },
+                            set: { settings.setShowDesktopFavorite($0) }
+                        )
+                    )
+                    SettingsToggleRow(
+                        title: "收藏废纸篓",
+                        isOn: Binding(
+                            get: { settings.showTrashFavorite },
+                            set: { settings.setShowTrashFavorite($0) }
+                        )
+                    )
+                }
+
+                settingsGroup {
+                    HotkeyRecorderRow(
+                        title: "开始菜单",
+                        chord: settings.startMenuHotkey,
+                        isBlocked: settings.isRecordingHotkey,
+                        onRecord: { settings.isRecordingHotkey = $0 },
+                        onSet: { settings.setStartMenuHotkey($0) }
+                    )
+                    HotkeyRecorderRow(
+                        title: "日历",
+                        chord: settings.calendarHotkey,
+                        isBlocked: settings.isRecordingHotkey,
+                        onRecord: { settings.isRecordingHotkey = $0 },
+                        onSet: { settings.setCalendarHotkey($0) }
+                    )
+                    Button(action: onOpenModifierKeys) {
+                        HStack {
+                            Text("修饰键")
+                                .font(.system(size: 13))
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.primary.opacity(0.35))
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Button(action: AppLog.openInFinder) {
+                        HStack {
+                            Text("打开日志")
+                                .font(.system(size: 13))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 28)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-            )
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
         }
     }
 
-    private var footer: some View {
-        HStack {
-            Label("KeelBar", systemImage: "menubar.dock.rectangle")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.primary.opacity(0.7))
-            Spacer()
-            Button(action: onClose) {
-                Text("完成")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(accent.onAccent)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(accent.color.opacity(0.9))
-                    )
-            }
-            .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.96))
+    private func settingsGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 0) {
+            content()
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(TaskbarTheme.footerFill)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        )
+    }
+}
+
+private struct SettingsChoiceRow<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(title)
+                .font(.system(size: 13))
+                .frame(width: 52, alignment: .leading)
+            HStack(spacing: 5) {
+                content
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 30)
+    }
+}
+
+private struct SettingsSegment: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    @Environment(\.taskbarAccent) private var accent
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? accent.onAccent : .primary.opacity(0.85))
+                .padding(.horizontal, 7)
+                .frame(height: 20)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(selected ? accent.color.opacity(0.9) : Color.primary.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
     }
 }
 
 private struct SettingsToggleRow: View {
     let title: String
-    let subtitle: String
-    let systemImage: String
     @Binding var isOn: Bool
     @Environment(\.taskbarAccent) private var accent
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(0.85))
-                    .frame(width: 28, height: 28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Color.primary.opacity(0.08))
-                    )
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary.opacity(0.92))
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.primary.opacity(0.45))
-                }
-            }
+            Text(title)
+                .font(.system(size: 13))
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .toggleStyle(.switch)
+        .controlSize(.small)
         .tint(accent.color)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(height: 28)
     }
 }
 
 private struct HotkeyRecorderRow: View {
     let title: String
-    let subtitle: String
-    let systemImage: String
     let chord: HotkeyChord?
     let isBlocked: Bool
     let onRecord: (Bool) -> Void
@@ -481,40 +276,27 @@ private struct HotkeyRecorderRow: View {
 
     var body: some View {
         Button(action: startRecording) {
-            HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(0.85))
-                    .frame(width: 28, height: 28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Color.primary.opacity(0.08))
-                    )
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary.opacity(0.92))
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.primary.opacity(0.45))
-                }
+            HStack {
+                Text(title)
+                    .font(.system(size: 13))
                 Spacer(minLength: 8)
-                Text(isRecording ? "按下快捷键" : (chord?.displayString ?? "未设置"))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(isRecording ? accent.onAccent : .primary.opacity(0.85))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
+                Text(isRecording ? "按下按键" : (chord?.displayString ?? "未设置"))
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(isRecording ? accent.onAccent : .primary.opacity(0.7))
+                    .padding(.horizontal, 6)
+                    .frame(height: 18)
                     .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
                             .fill(isRecording ? accent.color.opacity(0.9) : Color.primary.opacity(0.08))
                     )
             }
+            .padding(.horizontal, 12)
+            .frame(height: 28)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.98))
+        .buttonStyle(.plain)
         .disabled(isBlocked && !isRecording)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .onDisappear { stopRecording(apply: false) }
+        .onDisappear { stopRecording() }
     }
 
     private func startRecording() {
@@ -530,21 +312,21 @@ private struct HotkeyRecorderRow: View {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
 
         if event.keyCode == 53, modifiers.isEmpty {
-            stopRecording(apply: false)
+            stopRecording()
             return nil
         }
         if event.keyCode == 51, modifiers.isEmpty {
             onSet(nil)
-            stopRecording(apply: false)
+            stopRecording()
             return nil
         }
         guard let chord = HotkeyChord.from(event: event) else { return nil }
         onSet(chord)
-        stopRecording(apply: false)
+        stopRecording()
         return nil
     }
 
-    private func stopRecording(apply: Bool) {
+    private func stopRecording() {
         if let monitor {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil

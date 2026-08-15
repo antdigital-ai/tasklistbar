@@ -427,7 +427,7 @@ final class TaskbarController: NSObject {
         )
 
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 468),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -526,12 +526,7 @@ final class TaskbarController: NSObject {
             apply(calendar, calendarTargetFrame())
         }
         if let settings = settingsPanel {
-            apply(settings, NSRect(
-                x: frame.minX + 8,
-                y: frame.minY + bar + 8,
-                width: 420,
-                height: 580
-            ))
+            apply(settings, settingsTargetFrame())
         }
         if let list = windowListPanel {
             apply(list, windowListTargetFrame())
@@ -892,7 +887,7 @@ final class TaskbarController: NSObject {
         let count = viewModel.windowListBundleID.map { viewModel.appMonitor.windowCatalog.windows(for: $0).count } ?? 1
         let width = WindowListView.panelWidth
         let height = WindowListView.panelHeight(count: count)
-        var x = viewModel.windowListAnchorX - width / 2
+        var x = viewModel.windowListAnchorX - 12
         x = max(frame.minX + 8, min(x, frame.maxX - width - 8))
         return NSRect(
             x: x,
@@ -908,8 +903,8 @@ final class TaskbarController: NSObject {
         return NSRect(
             x: frame.minX + 8,
             y: frame.minY + Self.barHeight + 8,
-            width: 420,
-            height: 620
+            width: 340,
+            height: 468
         )
     }
 

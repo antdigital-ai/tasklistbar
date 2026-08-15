@@ -13,11 +13,25 @@ struct CatalogWindow: Identifiable, Hashable, Sendable {
     let bounds: CGRect
     let isOnScreen: Bool
     let isMinimized: Bool
+    let axIndex: Int
 
     func displayTitle(index: Int) -> String {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { return trimmed }
         return "窗口 \(index + 1)"
+    }
+
+    func withTitle(_ title: String) -> CatalogWindow {
+        CatalogWindow(
+            windowID: windowID,
+            pid: pid,
+            bundleID: bundleID,
+            title: title,
+            bounds: bounds,
+            isOnScreen: isOnScreen,
+            isMinimized: isMinimized,
+            axIndex: axIndex
+        )
     }
 }
 
@@ -127,16 +141,29 @@ final class WindowCatalog: ObservableObject {
     }
 
     nonisolated private static func scanSnapshot() -> Snapshot {
+        let cg = scanCG()
+        let listed = AXIsProcessTrusted() ? scanAXWindows(cg: cg) : cg.onScreenWindows
+        return Snapshot(windows: listed, uiPIDs: cg.uiPIDs, frontmostWindowID: cg.frontmostWindowID)
+    }
+
+    private struct CGScan: Sendable {
+        var onScreenWindows: [CatalogWindow]
+        var uiPIDs: Set<pid_t>
+        var frontmostWindowID: CGWindowID?
+        var bundleByPID: [pid_t: String]
+    }
+
+    nonisolated private static func scanCG() -> CGScan {
         guard let infoList = CGWindowListCopyWindowInfo(
             [.excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
-            return Snapshot(windows: [], uiPIDs: [], frontmostWindowID: nil)
+            return CGScan(onScreenWindows: [], uiPIDs: [], frontmostWindowID: nil, bundleByPID: [:])
         }
 
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        var pidBundles: [pid_t: String] = [:]
-        var windows: [CatalogWindow] = []
+        var bundleByPID: [pid_t: String] = [:]
+        var onScreenWindows: [CatalogWindow] = []
         var uiPIDs = Set<pid_t>()
         var frontmostWindowID: CGWindowID?
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -149,17 +176,16 @@ final class WindowCatalog: ObservableObject {
             let bounds = cgBounds(info[kCGWindowBounds as String] as? [String: Any])
             let onScreen = (info[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
             let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
-            let tooSmall = bounds.width < 50 || bounds.height < 50
-            if tooSmall { continue }
+            if bounds.width < 50 || bounds.height < 50 { continue }
             if onScreen, alpha <= 0.05 { continue }
 
             uiPIDs.insert(pid)
 
             let bundleID: String
-            if let cached = pidBundles[pid] {
+            if let cached = bundleByPID[pid] {
                 bundleID = cached
             } else if let bid = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier {
-                pidBundles[pid] = bid
+                bundleByPID[pid] = bid
                 bundleID = bid
             } else {
                 continue
@@ -171,26 +197,96 @@ final class WindowCatalog: ObservableObject {
 
             let title = (info[kCGWindowName as String] as? String) ?? ""
             if isLikelyDesktopWindow(bundleID: bundleID, title: title, bounds: bounds) { continue }
+            if isJunkTitle(title) { continue }
 
-            let minimized = !onScreen
-            windows.append(
-                CatalogWindow(
-                    windowID: windowID,
-                    pid: pid,
-                    bundleID: bundleID,
-                    title: title,
-                    bounds: bounds,
-                    isOnScreen: onScreen,
-                    isMinimized: minimized
+            if onScreen {
+                onScreenWindows.append(
+                    CatalogWindow(
+                        windowID: windowID,
+                        pid: pid,
+                        bundleID: bundleID,
+                        title: title,
+                        bounds: bounds,
+                        isOnScreen: true,
+                        isMinimized: false,
+                        axIndex: onScreenWindows.filter { $0.pid == pid }.count
+                    )
                 )
-            )
-
-            if frontmostWindowID == nil, onScreen, pid == frontPID {
-                frontmostWindowID = windowID
+                if frontmostWindowID == nil, pid == frontPID {
+                    frontmostWindowID = windowID
+                }
             }
         }
 
-        return Snapshot(windows: windows, uiPIDs: uiPIDs, frontmostWindowID: frontmostWindowID)
+        return CGScan(
+            onScreenWindows: onScreenWindows,
+            uiPIDs: uiPIDs,
+            frontmostWindowID: frontmostWindowID,
+            bundleByPID: bundleByPID
+        )
+    }
+
+    nonisolated private static func scanAXWindows(cg: CGScan) -> [CatalogWindow] {
+        var result: [CatalogWindow] = []
+        let pids = cg.uiPIDs.sorted()
+        for pid in pids {
+            guard let bundleID = cg.bundleByPID[pid] ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+                  bundleID != AppItemFactory.ownBundleID
+            else { continue }
+
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, 0.12)
+            guard let axWindows = AXHelper.children(app, attribute: kAXWindowsAttribute as CFString) else { continue }
+
+            var acceptedIndex = 0
+            for window in axWindows {
+                guard WindowRaiser.isListable(window) else { continue }
+                let minimized = AXHelper.bool(window, kAXMinimizedAttribute as CFString) ?? false
+                let size = AXHelper.size(window, kAXSizeAttribute as CFString) ?? .zero
+                let title = (AXHelper.string(window, kAXTitleAttribute as CFString) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if isLikelyDesktopWindow(bundleID: bundleID, title: title, bounds: CGRect(origin: .zero, size: size)) {
+                    continue
+                }
+
+                let number = AXHelper.number(window, "AXWindowNumber" as CFString).map { CGWindowID(UInt32($0)) }
+                let windowID = number
+                    ?? cg.onScreenWindows.first { $0.pid == pid && !$0.title.isEmpty && $0.title == title }?.windowID
+                    ?? 0
+
+                result.append(
+                    CatalogWindow(
+                        windowID: windowID,
+                        pid: pid,
+                        bundleID: bundleID,
+                        title: title,
+                        bounds: CGRect(origin: .zero, size: size),
+                        isOnScreen: !minimized,
+                        isMinimized: minimized,
+                        axIndex: acceptedIndex
+                    )
+                )
+                acceptedIndex += 1
+            }
+        }
+
+        let axPIDs = Set(result.map(\.pid))
+        for window in cg.onScreenWindows where !axPIDs.contains(window.pid) {
+            result.append(window)
+        }
+        return result
+    }
+
+    fileprivate nonisolated static let skippedSubroles: Set<String> = [
+        "AXUnknown", "AXOverlay", "AXImage", "AXToolbar"
+    ]
+
+    fileprivate nonisolated static func isJunkTitle(_ title: String) -> Bool {
+        let lower = title.lowercased()
+        return lower == "focus proxy"
+            || lower == "msitemoverlay"
+            || lower == "chrome legacy window"
+            || lower.hasPrefix("item-")
     }
 
     nonisolated private static func isLikelyDesktopWindow(bundleID: String, title: String, bounds: CGRect) -> Bool {
@@ -337,8 +433,8 @@ final class WindowCatalog: ObservableObject {
 }
 
 enum WindowRaiser {
-    static func raise(pid: pid_t, windowID: CGWindowID, title: String?) {
-        guard let window = findWindow(pid: pid, windowID: windowID, title: title) else { return }
+    static func raise(pid: pid_t, windowID: CGWindowID, title: String?, axIndex: Int? = nil) {
+        guard let window = findWindow(pid: pid, windowID: windowID, title: title, axIndex: axIndex) else { return }
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
@@ -346,14 +442,14 @@ enum WindowRaiser {
     }
 
     @discardableResult
-    static func minimize(pid: pid_t, windowID: CGWindowID, title: String?) -> Bool {
-        guard let window = findWindow(pid: pid, windowID: windowID, title: title) else { return false }
+    static func minimize(pid: pid_t, windowID: CGWindowID, title: String?, axIndex: Int? = nil) -> Bool {
+        guard let window = findWindow(pid: pid, windowID: windowID, title: title, axIndex: axIndex) else { return false }
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
         return true
     }
 
-    static func close(pid: pid_t, windowID: CGWindowID, title: String?) {
-        guard let window = findWindow(pid: pid, windowID: windowID, title: title) else { return }
+    static func close(pid: pid_t, windowID: CGWindowID, title: String?, axIndex: Int? = nil) {
+        guard let window = findWindow(pid: pid, windowID: windowID, title: title, axIndex: axIndex) else { return }
         var buttonRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &buttonRef) == .success,
               let button = buttonRef
@@ -369,22 +465,64 @@ enum WindowRaiser {
         return error == .cannotComplete
     }
 
-    private static func findWindow(pid: pid_t, windowID: CGWindowID, title: String?) -> AXUIElement? {
-        let app = AXUIElementCreateApplication(pid)
-        guard let windows = AXHelper.children(app, attribute: kAXWindowsAttribute as CFString) else { return nil }
+    struct WindowInfo {
+        var number: CGWindowID?
+        var title: String
+    }
 
-        for window in windows {
-            if let number = AXHelper.number(window, "AXWindowNumber" as CFString),
-               CGWindowID(UInt32(number)) == windowID {
-                return window
+    static func windowInfos(pid: pid_t) -> [WindowInfo] {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        guard let windows = AXHelper.children(app, attribute: kAXWindowsAttribute as CFString) else { return [] }
+        return windows.compactMap { window in
+            let title = (AXHelper.string(window, kAXTitleAttribute as CFString) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { return nil }
+            let number = AXHelper.number(window, "AXWindowNumber" as CFString).map { CGWindowID(UInt32($0)) }
+            return WindowInfo(number: number, title: title)
+        }
+    }
+
+    static func isListable(_ window: AXUIElement) -> Bool {
+        let role = AXHelper.string(window, kAXRoleAttribute as CFString) ?? ""
+        guard role == (kAXWindowRole as String) else { return false }
+        let subrole = AXHelper.string(window, kAXSubroleAttribute as CFString) ?? ""
+        if WindowCatalog.skippedSubroles.contains(subrole) { return false }
+
+        let minimized = AXHelper.bool(window, kAXMinimizedAttribute as CFString) ?? false
+        let size = AXHelper.size(window, kAXSizeAttribute as CFString) ?? .zero
+        if !minimized, size.width < 80 || size.height < 80 { return false }
+
+        let title = (AXHelper.string(window, kAXTitleAttribute as CFString) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if WindowCatalog.isJunkTitle(title) { return false }
+        if title.isEmpty, !minimized, size.width < 200 || size.height < 120 { return false }
+        return true
+    }
+
+    private static func findWindow(pid: pid_t, windowID: CGWindowID, title: String?, axIndex: Int?) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.2)
+        guard let windows = AXHelper.children(app, attribute: kAXWindowsAttribute as CFString) else { return nil }
+        let listable = windows.filter(isListable)
+
+        if windowID != 0 {
+            for window in listable {
+                if let number = AXHelper.number(window, "AXWindowNumber" as CFString),
+                   CGWindowID(UInt32(number)) == windowID {
+                    return window
+                }
             }
         }
         if let title, !title.isEmpty {
-            if let match = windows.first(where: { AXHelper.string($0, kAXTitleAttribute as CFString) == title }) {
+            if let match = listable.first(where: { AXHelper.string($0, kAXTitleAttribute as CFString) == title }) {
                 return match
             }
         }
-        return windows.first
+        if let axIndex, listable.indices.contains(axIndex) {
+            return listable[axIndex]
+        }
+        return nil
     }
 }
 
@@ -400,6 +538,23 @@ enum AXHelper {
         guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success else { return nil }
         if let number = ref as? NSNumber { return number.doubleValue }
         return nil
+    }
+
+    static func bool(_ element: AXUIElement, _ attribute: CFString) -> Bool? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success else { return nil }
+        return ref as? Bool
+    }
+
+    static func size(_ element: AXUIElement, _ attribute: CFString) -> CGSize? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success,
+              let value = ref,
+              CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        var size = CGSize.zero
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else { return nil }
+        return size
     }
 
     static func children(_ element: AXUIElement, attribute: CFString = kAXChildrenAttribute as CFString) -> [AXUIElement]? {

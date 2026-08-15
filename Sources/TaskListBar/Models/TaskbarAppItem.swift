@@ -13,6 +13,7 @@ struct TaskbarAppItem: Identifiable, Hashable {
     let isPinned: Bool
     let processIdentifier: pid_t?
     let windowID: CGWindowID?
+    let windowIndex: Int?
     let windowTitle: String?
     let windowCount: Int
     let badge: Int?
@@ -35,6 +36,7 @@ enum AppItemFactory {
         isPinned: Bool,
         processIdentifier: pid_t? = nil,
         windowID: CGWindowID? = nil,
+        windowIndex: Int? = nil,
         windowTitle: String? = nil,
         windowCount: Int = 0,
         badge: Int? = nil,
@@ -55,6 +57,7 @@ enum AppItemFactory {
             isPinned: isPinned,
             processIdentifier: processIdentifier,
             windowID: windowID,
+            windowIndex: windowIndex,
             windowTitle: windowTitle,
             windowCount: windowCount,
             badge: badge,

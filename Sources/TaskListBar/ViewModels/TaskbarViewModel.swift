@@ -88,12 +88,6 @@ final class TaskbarViewModel: ObservableObject {
             .sink { [weak self] _ in self?.scheduleRebuild() }
             .store(in: &cancellables)
 
-        appSettings.$showWindowCount
-            .dropFirst()
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.scheduleRebuild() }
-            .store(in: &cancellables)
-
         appSettings.$showBadges
             .dropFirst()
             .receive(on: RunLoop.main)
@@ -161,7 +155,6 @@ final class TaskbarViewModel: ObservableObject {
         let pinned = pinnedStore.pinnedBundleIDs
         let catalog = appMonitor.windowCatalog
         let showBadges = appSettings.showBadges
-        let showCount = appSettings.showWindowCount
 
         let runningByID = Dictionary(
             running.compactMap { app -> (String, NSRunningApplication)? in
@@ -212,7 +205,6 @@ final class TaskbarViewModel: ObservableObject {
         signatureParts.reserveCapacity(entries.count)
         for entry in entries {
             let badge = showBadges ? catalog.badges[entry.bid] ?? 0 : 0
-            let countShown = (showCount && grouped && entry.windows.count > 1 && badge == 0) ? 1 : 0
             let progress = Int((catalog.progress[entry.bid] ?? -1) * 100)
             let hung = entry.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
             let active = frontID == entry.bid ? 1 : 0
@@ -220,7 +212,7 @@ final class TaskbarViewModel: ObservableObject {
                 ? "g\(entry.windows.count)"
                 : entry.windows.map { "\($0.windowID):\($0.title)" }.joined(separator: "+")
             signatureParts.append(
-                "\(entry.bid):\(entry.running == nil ? 0 : 1)\(active)\(entry.isPinned ? 1 : 0)|\(windowPart)|\(badge)|\(countShown)|\(progress)|\(hung ? 1 : 0)|\(grouped ? 1 : 0)"
+                "\(entry.bid):\(entry.running == nil ? 0 : 1)\(active)\(entry.isPinned ? 1 : 0)|\(windowPart)|\(badge)|\(progress)|\(hung ? 1 : 0)|\(grouped ? 1 : 0)"
             )
         }
         let signature = signatureParts.joined(separator: ",") + "@\(Int(appStripAvailableWidth))"
@@ -246,9 +238,6 @@ final class TaskbarViewModel: ObservableObject {
             let unread = showBadges ? catalog.badges[entry.bid] : nil
             let progress = catalog.progress[entry.bid]
             let hung = entry.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
-            let countBadge = (showCount && grouped && entry.windows.count > 1 && unread == nil) ? entry.windows.count : nil
-            let displayedBadge = unread ?? countBadge
-            let badgeIsUnread = unread != nil
 
             if !grouped, !entry.windows.isEmpty {
                 for (index, window) in entry.windows.enumerated() {
@@ -263,10 +252,11 @@ final class TaskbarViewModel: ObservableObject {
                             isPinned: entry.isPinned,
                             processIdentifier: window.pid,
                             windowID: window.windowID,
+                            windowIndex: window.axIndex,
                             windowTitle: window.displayTitle(index: index),
                             windowCount: entry.windows.count,
-                            badge: index == 0 ? displayedBadge : nil,
-                            badgeIsUnread: index == 0 && badgeIsUnread,
+                            badge: index == 0 ? unread : nil,
+                            badgeIsUnread: index == 0 && unread != nil,
                             progress: index == 0 ? progress : nil,
                             isUnresponsive: hung,
                             isGrouped: false
@@ -285,8 +275,8 @@ final class TaskbarViewModel: ObservableObject {
                         isPinned: entry.isPinned,
                         processIdentifier: entry.running?.processIdentifier,
                         windowCount: entry.windows.count,
-                        badge: displayedBadge,
-                        badgeIsUnread: badgeIsUnread,
+                        badge: unread,
+                        badgeIsUnread: unread != nil,
                         progress: progress,
                         isUnresponsive: hung,
                         isGrouped: true
@@ -314,11 +304,16 @@ final class TaskbarViewModel: ObservableObject {
 
     func select(_ item: TaskbarAppItem) {
         if item.isGrouped, item.isRunning, item.windowCount >= 2 {
-            if isWindowListOpen, windowListBundleID == item.bundleIdentifier {
-                closeWindowList()
+            if item.isActive {
+                if isWindowListOpen, windowListBundleID == item.bundleIdentifier {
+                    closeWindowList()
+                } else {
+                    closeOverlays(includingWindowList: false)
+                    openWindowList(item)
+                }
             } else {
-                closeOverlays(includingWindowList: false)
-                openWindowList(item)
+                closeOverlays()
+                appMonitor.activateOrLaunch(item: item)
             }
             return
         }

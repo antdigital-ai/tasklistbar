@@ -115,12 +115,22 @@ final class AppMonitor: ObservableObject {
         if let running = resolvedRunning(for: item) {
             if let windowID = item.windowID {
                 if item.isActive {
-                    if !WindowRaiser.minimize(pid: running.processIdentifier, windowID: windowID, title: item.windowTitle) {
+                    if !WindowRaiser.minimize(
+                        pid: running.processIdentifier,
+                        windowID: windowID,
+                        title: item.windowTitle,
+                        axIndex: item.windowIndex
+                    ) {
                         running.hide()
                     }
                     return
                 }
-                AppActivation.bringToFront(running, windowID: windowID, windowTitle: item.windowTitle)
+                AppActivation.bringToFront(
+                    running,
+                    windowID: windowID,
+                    windowTitle: item.windowTitle,
+                    axIndex: item.windowIndex
+                )
                 return
             }
             if item.isActive || running.isActive {
@@ -168,12 +178,17 @@ final class AppMonitor: ObservableObject {
 
     func raise(window: CatalogWindow) {
         guard let running = NSRunningApplication(processIdentifier: window.pid), !running.isTerminated else { return }
-        AppActivation.bringToFront(running, windowID: window.windowID, windowTitle: window.title)
+        AppActivation.bringToFront(
+            running,
+            windowID: window.windowID,
+            windowTitle: window.title,
+            axIndex: window.axIndex
+        )
     }
 
     func closeWindow(_ item: TaskbarAppItem) {
         guard let windowID = item.windowID, let pid = item.processIdentifier else { return }
-        WindowRaiser.close(pid: pid, windowID: windowID, title: item.windowTitle)
+        WindowRaiser.close(pid: pid, windowID: windowID, title: item.windowTitle, axIndex: item.windowIndex)
         windowCatalog.refresh()
     }
 }
@@ -193,7 +208,8 @@ enum AppActivation {
         _ running: NSRunningApplication,
         allowOpenFallback: Bool = true,
         windowID: CGWindowID? = nil,
-        windowTitle: String? = nil
+        windowTitle: String? = nil,
+        axIndex: Int? = nil
     ) {
         guard !running.isTerminated else { return }
         running.unhide()
@@ -204,7 +220,7 @@ enum AppActivation {
         }
         running.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
         if let windowID {
-            WindowRaiser.raise(pid: running.processIdentifier, windowID: windowID, title: windowTitle)
+            WindowRaiser.raise(pid: running.processIdentifier, windowID: windowID, title: windowTitle, axIndex: axIndex)
         } else {
             raiseWindows(of: running)
         }
