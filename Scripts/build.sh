@@ -10,12 +10,23 @@ APP_BUNDLE="$ROOT/dist/${APP_NAME}.app"
 CONFIG="${1:-debug}"
 
 echo "→ Building ${APP_NAME} (${CONFIG})…"
-swift build -c "$CONFIG"
+# Native arm64 on Apple Silicon; release uses SPM -O + WMO by default.
+SWIFT_BUILD_ARGS=(-c "$CONFIG" --arch arm64)
+if [[ "$CONFIG" == "release" ]]; then
+  # Drop debug info from the linked product; strip finishes the job.
+  SWIFT_BUILD_ARGS+=(-Xswiftc -gnone)
+fi
+swift build "${SWIFT_BUILD_ARGS[@]}"
 
 BIN="$BUILD_DIR/$CONFIG/$APP_NAME"
 if [[ ! -x "$BIN" ]]; then
   echo "Binary not found: $BIN" >&2
   exit 1
+fi
+
+if [[ "$CONFIG" == "release" ]]; then
+  echo "→ Stripping ${BIN}"
+  strip -x "$BIN" >/dev/null 2>&1 || true
 fi
 
 echo "→ Assembling ${APP_BUNDLE}"

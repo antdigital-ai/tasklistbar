@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
 
 struct FavoriteBookmark: Identifiable, Codable, Hashable {
@@ -18,6 +19,8 @@ final class FavoritesStore: ObservableObject {
     @Published private(set) var isTrashFull = false
 
     private var trashTask: Task<Void, Never>?
+    private var trashSource: DispatchSourceFileSystemObject?
+    private var trashFD: CInt = -1
     private var didPromptFDA = UserDefaults.standard.bool(forKey: FavoritesStore.promptedKey)
 
     static var desktopURL: URL {
@@ -34,21 +37,56 @@ final class FavoritesStore: ObservableObject {
 
     func start() {
         refreshTrashState()
-        trashTask?.cancel()
-        trashTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    self?.refreshTrashState()
-                }
-            }
-        }
+        startTrashWatcher()
     }
 
     func stop() {
+        stopTrashWatcher()
+    }
+
+    /// Prefer FSEvents over a fixed poll so idle CPU stays near zero.
+    private func startTrashWatcher() {
+        stopTrashWatcher()
+        let path = Self.trashURL.path
+        let fd = Darwin.open(path, O_EVTONLY)
+        guard fd >= 0 else {
+            // Fallback if Trash is inaccessible (e.g. missing FDA): sparse poll.
+            trashTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        self?.refreshTrashState()
+                    }
+                }
+            }
+            return
+        }
+        trashFD = fd
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .delete, .rename, .extend, .attrib, .link],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            self?.refreshTrashState()
+        }
+        source.setCancelHandler { [weak self] in
+            guard let self else { return }
+            if self.trashFD >= 0 {
+                Darwin.close(self.trashFD)
+                self.trashFD = -1
+            }
+        }
+        trashSource = source
+        source.resume()
+    }
+
+    private func stopTrashWatcher() {
         trashTask?.cancel()
         trashTask = nil
+        trashSource?.cancel()
+        trashSource = nil
     }
 
     func add(url: URL) {

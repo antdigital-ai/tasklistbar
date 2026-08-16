@@ -53,7 +53,8 @@ struct WeatherAtmosphereView: View {
         .task(id: isActive) {
             guard isActive else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 200_000_000)
+                // ~4 fps is enough for soft weather motion while the calendar is open.
+                try? await Task.sleep(nanoseconds: 250_000_000)
                 time = Date().timeIntervalSinceReferenceDate
             }
         }

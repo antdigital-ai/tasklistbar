@@ -91,7 +91,11 @@ final class TaskbarViewModel: ObservableObject {
         appSettings.$showBadges
             .dropFirst()
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.scheduleRebuild() }
+            .sink { [weak self] enabled in
+                guard let self else { return }
+                self.appMonitor.windowCatalog.includeDockExtras = enabled
+                self.scheduleRebuild()
+            }
             .store(in: &cancellables)
 
         appSettings.$barSize
@@ -99,6 +103,15 @@ final class TaskbarViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.scheduleRebuild() }
             .store(in: &cancellables)
+
+        $isWindowListOpen
+            .receive(on: RunLoop.main)
+            .sink { [weak self] open in
+                self?.appMonitor.windowCatalog.prefersFastPolling = open
+            }
+            .store(in: &cancellables)
+
+        appMonitor.windowCatalog.includeDockExtras = appSettings.showBadges
 
         $isCalendarExpanded
             .dropFirst()

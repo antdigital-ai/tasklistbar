@@ -44,19 +44,31 @@ final class WindowCatalog: ObservableObject {
     @Published private(set) var unresponsivePIDs: Set<pid_t> = []
     @Published private(set) var frontmostWindowID: CGWindowID?
 
+    /// Faster scans while the window-list popover is open; quieter otherwise.
+    var prefersFastPolling = false
+    /// Dock AX badge/progress walks are expensive — skip when badges are disabled.
+    var includeDockExtras = true
+
     private var pollTask: Task<Void, Never>?
     private var scanTask: Task<Void, Never>?
     private var pendingScan = false
     private var lastSignature = ""
     private var hungCache: [pid_t: (value: Bool, at: Date)] = [:]
     private var hungCursor = 0
+    private var dockExtrasTick = 0
+    private var lastDockExtras = DockExtras(badges: [:], progress: [:])
+
+    private var pollIntervalNanoseconds: UInt64 {
+        prefersFastPolling ? 750_000_000 : 2_000_000_000
+    }
 
     func start() {
         stop()
         scheduleScan()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let nanos = await MainActor.run { self?.pollIntervalNanoseconds ?? 2_000_000_000 }
+                try? await Task.sleep(nanoseconds: nanos)
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self?.scheduleScan()
@@ -88,9 +100,21 @@ final class WindowCatalog: ObservableObject {
         }
         let hungCache = self.hungCache
         let hungCursor = self.hungCursor
+        let shouldReadDock: Bool
+        if includeDockExtras {
+            dockExtrasTick &+= 1
+            // Dock AX tree walk is costly; refresh badges/progress every 3rd scan (~6s idle).
+            shouldReadDock = prefersFastPolling || dockExtrasTick % 3 == 1
+        } else {
+            shouldReadDock = false
+            if !lastDockExtras.badges.isEmpty || !lastDockExtras.progress.isEmpty {
+                lastDockExtras = DockExtras(badges: [:], progress: [:])
+            }
+        }
+        let reuseExtras = lastDockExtras
         scanTask = Task.detached(priority: .utility) { [weak self] in
             let snapshot = WindowCatalog.scanSnapshot()
-            let extras = WindowCatalog.readDockExtras()
+            let extras = shouldReadDock ? WindowCatalog.readDockExtras() : reuseExtras
             let hung = WindowCatalog.probeUnresponsive(
                 pids: snapshot.uiPIDs,
                 cache: hungCache,
@@ -111,6 +135,7 @@ final class WindowCatalog: ObservableObject {
     private func apply(_ snapshot: Snapshot, extras: DockExtras, hung: HungResult) {
         hungCache = hung.cache
         hungCursor = hung.cursor
+        lastDockExtras = extras
         let signature = snapshot.signature
             + "|b:\(extras.badges.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","))"
             + "|p:\(extras.progress.sorted { $0.key < $1.key }.map { "\($0.key)=\(Int($0.value * 100))" }.joined(separator: ","))"
