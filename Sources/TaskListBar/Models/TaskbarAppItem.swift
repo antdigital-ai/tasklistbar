@@ -21,6 +21,9 @@ struct TaskbarAppItem: Identifiable, Hashable {
     let progress: Double?
     let isUnresponsive: Bool
     let isGrouped: Bool
+    let isFolder: Bool
+
+    var iconReorderID: String { isFolder ? id : bundleIdentifier }
 }
 
 enum AppItemFactory {
@@ -43,7 +46,8 @@ enum AppItemFactory {
         badgeIsUnread: Bool = false,
         progress: Double? = nil,
         isUnresponsive: Bool = false,
-        isGrouped: Bool = true
+        isGrouped: Bool = true,
+        isFolder: Bool = false
     ) -> TaskbarAppItem {
         let id = windowID.map { "\(bundleIdentifier)#\($0)" } ?? bundleIdentifier
         return TaskbarAppItem(
@@ -64,7 +68,8 @@ enum AppItemFactory {
             badgeIsUnread: badgeIsUnread,
             progress: progress,
             isUnresponsive: isUnresponsive,
-            isGrouped: isGrouped
+            isGrouped: isGrouped,
+            isFolder: isFolder
         )
     }
 }

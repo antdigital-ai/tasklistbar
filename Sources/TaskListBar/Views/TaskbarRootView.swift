@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum TaskbarMetrics {
     static var size: TaskbarSize = .regular
@@ -44,6 +45,10 @@ struct TaskbarRootView: View {
             TaskbarAppStrip(viewModel: viewModel)
 
             Spacer(minLength: 6)
+                .contentShape(Rectangle())
+                .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                    viewModel.handleTaskbarFileDrop(providers)
+                }
 
             SystemTrayView(
                 battery: viewModel.batteryMonitor,
@@ -84,20 +89,23 @@ private struct AppStripViewportKey: PreferenceKey {
 
 struct TaskbarAppStrip: View {
     @ObservedObject var viewModel: TaskbarViewModel
-    @GestureState private var dragTranslation: CGFloat = 0
-    @State private var baseOffset: CGFloat = 0
+    @Environment(\.taskbarSize) private var size
+    @StateObject private var scroll = StripScrollState()
     @State private var contentWidth: CGFloat = 0
     @State private var viewportWidth: CGFloat = 0
+    @State private var dropTargeted = false
+    @State private var dropTargetID: String?
+    @State private var scrollMonitor: Any?
 
     private var overflow: CGFloat { max(0, contentWidth - viewportWidth) }
     private var offset: CGFloat {
-        min(0, max(-overflow, baseOffset + dragTranslation))
+        min(0, max(-overflow, scroll.offset))
     }
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(viewModel.items) { item in
-                TaskbarAppButton(item: item) {
+                TaskbarAppButton(item: item, isDropTarget: dropTargetID == item.iconReorderID) {
                     viewModel.select(item)
                 } pinAction: {
                     if item.isPinned {
@@ -105,10 +113,18 @@ struct TaskbarAppStrip: View {
                     } else {
                         viewModel.pin(item)
                     }
+                } revealAction: {
+                    viewModel.revealPinnedFolder(item)
                 } quitAction: {
                     viewModel.quit(item)
                 } closeWindowAction: {
                     viewModel.closeWindow(item)
+                }
+                .onDrag {
+                    NSItemProvider(object: item.iconReorderID as NSString)
+                }
+                .onDrop(of: [.text, .fileURL], isTargeted: dropBinding(for: item.iconReorderID)) { providers in
+                    handleDrop(providers, onto: item)
                 }
                 .transition(
                     .asymmetric(
@@ -118,7 +134,7 @@ struct TaskbarAppStrip: View {
                 )
             }
         }
-        .animation(TaskbarMotion.list, value: viewModel.items.map(\.id))
+        .animation(TaskbarMotion.list, value: viewModel.pinnedStore.items.map(\.id))
         .fixedSize(horizontal: true, vertical: false)
         .background(
             GeometryReader { geo in
@@ -140,22 +156,75 @@ struct TaskbarAppStrip: View {
         }
         .onChange(of: viewModel.items.map(\.id)) { _ in clampOffset() }
         .onChange(of: overflow) { _ in clampOffset() }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 16)
-                .updating($dragTranslation) { value, state, _ in
-                    guard overflow > 0 else { return }
-                    state = value.translation.width
-                }
-                .onEnded { value in
-                    guard overflow > 0 else { return }
-                    baseOffset = min(0, max(-overflow, baseOffset + value.translation.width))
-                }
+        .onHover { hovering in
+            updateScrollMonitor(hovering)
+        }
+        .onDisappear { updateScrollMonitor(false) }
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            viewModel.handleTaskbarFileDrop(providers)
+        }
+        .padding(dropTargeted ? 1 : 0)
+        .background(
+            RoundedRectangle(cornerRadius: size.corner, style: .continuous)
+                .fill(dropTargeted ? TaskbarTheme.hover : Color.clear)
         )
     }
 
-    private func clampOffset() {
-        baseOffset = min(0, max(-overflow, baseOffset))
+    private func dropBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { dropTargetID == id },
+            set: { dropTargetID = $0 ? id : (dropTargetID == id ? nil : dropTargetID) }
+        )
     }
+
+    private func handleDrop(_ providers: [NSItemProvider], onto item: TaskbarAppItem) -> Bool {
+        if providers.contains(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }) {
+            return handleReorder(providers, onto: item.iconReorderID)
+        }
+        return viewModel.handleTaskbarFileDrop(providers, before: item.iconReorderID)
+    }
+
+    private func handleReorder(_ providers: [NSItemProvider], onto targetID: String) -> Bool {
+        guard let provider = providers.first else { return false }
+        provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, _ in
+            let raw: String?
+            if let data = item as? Data {
+                raw = String(data: data, encoding: .utf8)
+            } else {
+                raw = item as? String
+            }
+            guard let dragged = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !dragged.isEmpty else { return }
+            Task { @MainActor in
+                viewModel.reorderIcons(draggedID: dragged, onto: targetID)
+            }
+        }
+        return true
+    }
+
+    private func clampOffset() {
+        scroll.offset = min(0, max(-overflow, scroll.offset))
+    }
+
+    private func updateScrollMonitor(_ hovering: Bool) {
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
+            self.scrollMonitor = nil
+        }
+        guard hovering else { return }
+        let state = scroll
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            let overflow = max(0, contentWidth - viewportWidth)
+            guard overflow > 0 else { return event }
+            let delta = event.scrollingDeltaX != 0 ? event.scrollingDeltaX : event.scrollingDeltaY
+            guard abs(delta) > 0.2 else { return event }
+            state.offset = min(0, max(-overflow, state.offset + delta * 2))
+            return nil
+        }
+    }
+}
+
+private final class StripScrollState: ObservableObject {
+    @Published var offset: CGFloat = 0
 }
 
 struct StartButton: View {
@@ -217,8 +286,10 @@ struct StartButton: View {
 
 struct TaskbarAppButton: View {
     let item: TaskbarAppItem
+    var isDropTarget = false
     let action: () -> Void
     let pinAction: () -> Void
+    var revealAction: (() -> Void)?
     let quitAction: () -> Void
     var closeWindowAction: (() -> Void)?
 
@@ -289,7 +360,7 @@ struct TaskbarAppButton: View {
             .frame(width: size.appButtonWidth, height: size.appButtonHeight)
             .background(
                 RoundedRectangle(cornerRadius: size.corner, style: .continuous)
-                    .fill(item.isActive || hovering ? TaskbarTheme.activeFill : Color.clear)
+                    .fill(item.isActive || hovering || isDropTarget ? TaskbarTheme.activeFill : Color.clear)
             )
             .contentShape(RoundedRectangle(cornerRadius: size.corner, style: .continuous))
         }
@@ -301,13 +372,20 @@ struct TaskbarAppButton: View {
         }
         .help(helpText)
         .contextMenu {
-            Button(item.isPinned ? "从任务栏取消固定" : "固定到任务栏", action: pinAction)
-            if item.windowID != nil {
-                Button("关闭窗口") { closeWindowAction?() }
-            }
-            if item.isRunning {
+            if item.isFolder {
+                Button("打开", action: action)
+                Button("在 Finder 中显示") { revealAction?() }
                 Divider()
-                Button("退出 \(item.name)", action: quitAction)
+                Button("从任务栏取消固定", action: pinAction)
+            } else {
+                Button(item.isPinned ? "从任务栏取消固定" : "固定到任务栏", action: pinAction)
+                if item.windowID != nil {
+                    Button("关闭窗口") { closeWindowAction?() }
+                }
+                if item.isRunning {
+                    Divider()
+                    Button("退出 \(item.name)", action: quitAction)
+                }
             }
         }
     }

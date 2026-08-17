@@ -74,30 +74,14 @@ struct FavoritesStripView: View {
     }
 
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
-        for provider in providers {
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                let url: URL?
-                if let data = item as? Data {
-                    url = URL(dataRepresentation: data, relativeTo: nil)
-                } else if let raw = item as? URL {
-                    url = raw
-                } else if let path = item as? String {
-                    url = URL(fileURLWithPath: path)
-                } else {
-                    url = nil
-                }
-                guard let url else { return }
-                Task { @MainActor in
-                    if url.pathExtension.lowercased() == "app",
-                       let bid = Bundle(url: url)?.bundleIdentifier {
-                        onPinApp(bid)
-                    } else {
-                        store.add(url: url)
-                    }
-                }
+        DroppedFileURLs.load(providers) { url in
+            if url.pathExtension.lowercased() == "app",
+               let bid = Bundle(url: url)?.bundleIdentifier {
+                onPinApp(bid)
+            } else {
+                store.add(url: url)
             }
         }
-        return true
     }
 
     private func handleReorder(_ providers: [NSItemProvider], onto target: UUID) -> Bool {

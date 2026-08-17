@@ -112,6 +112,12 @@ final class AppMonitor: ObservableObject {
     }
 
     func activateOrLaunch(item: TaskbarAppItem) {
+        if item.isFolder {
+            if let url = item.url {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
         if let running = resolvedRunning(for: item) {
             if let windowID = item.windowID {
                 if item.isActive {

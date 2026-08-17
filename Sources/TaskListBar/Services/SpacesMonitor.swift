@@ -34,7 +34,7 @@ final class SpacesMonitor: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
-                    self?.scheduleRefresh()
+                    self?.refresh(updateFullscreen: false)
                 }
             }
         )
@@ -53,7 +53,7 @@ final class SpacesMonitor: ObservableObject {
 
     private func scheduleRefresh() {
         debounceTask?.cancel()
-        refresh()
+        refresh(updateFullscreen: false)
         debounceTask = Task { [weak self] in
             // SkyLight sometimes reports the previous space immediately after the notification.
             try? await Task.sleep(nanoseconds: 120_000_000)
@@ -65,7 +65,7 @@ final class SpacesMonitor: ObservableObject {
         }
     }
 
-    func refresh() {
+    func refresh(updateFullscreen: Bool = true) {
         guard let info = SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main)) else { return }
         let nextCurrent = info.current
         let nextCount = max(info.count, 1)
@@ -75,7 +75,7 @@ final class SpacesMonitor: ObservableObject {
         if nextCount != spaceCount {
             spaceCount = nextCount
         }
-        if info.isFullscreen != isFullscreenSpace {
+        if updateFullscreen, info.isFullscreen != isFullscreenSpace {
             isFullscreenSpace = info.isFullscreen
         }
     }

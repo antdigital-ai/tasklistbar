@@ -306,6 +306,7 @@ final class TaskbarController: NSObject {
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
         panel.isRestorable = false
+        panel.animationBehavior = .none
         applyBarHeightConstraints(to: panel)
         panel.contentView = glass
         panel.ignoresMouseEvents = false
@@ -481,13 +482,29 @@ final class TaskbarController: NSObject {
 
     private func layoutPanels() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
-        panel?.setFrame(taskbarFrame(on: screen), display: true)
+        let target = taskbarFrame(on: screen)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            if let panel, !Self.framesAlmostEqual(panel.frame, target) {
+                panel.setFrame(target, display: true)
+            }
+        }
         if viewModel.spacesMonitor.isFullscreenSpace {
-            panel?.orderOut(nil)
-        } else {
+            if panel?.isVisible == true {
+                panel?.orderOut(nil)
+            }
+        } else if panel?.isVisible != true {
             panel?.orderFrontRegardless()
         }
         layoutOverlays(on: screen, animated: false)
+    }
+
+    private static func framesAlmostEqual(_ a: NSRect, _ b: NSRect) -> Bool {
+        abs(a.minX - b.minX) < 0.5
+            && abs(a.minY - b.minY) < 0.5
+            && abs(a.width - b.width) < 0.5
+            && abs(a.height - b.height) < 0.5
     }
 
     private func taskbarFrame(on screen: NSScreen) -> NSRect {
@@ -1238,14 +1255,7 @@ final class TaskbarPanel: NSPanel {
     var locksHeight = true
 
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
-        var rect = frameRect
-        if locksHeight {
-            rect.size.height = TaskbarMetrics.barHeight
-        }
-        if let screen = screen ?? self.screen {
-            rect.origin.y = screen.frame.minY
-        }
-        return rect
+        lockedFrame(frameRect, preferredScreen: screen)
     }
 
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
@@ -1253,16 +1263,19 @@ final class TaskbarPanel: NSPanel {
     }
 
     override func setFrame(_ frameRect: NSRect, display displayFlag: Bool, animate animateFlag: Bool) {
-        super.setFrame(lockedFrame(frameRect), display: displayFlag, animate: animateFlag)
+        super.setFrame(lockedFrame(frameRect), display: displayFlag, animate: false)
     }
 
-    private func lockedFrame(_ frameRect: NSRect) -> NSRect {
+    private func lockedFrame(_ frameRect: NSRect, preferredScreen: NSScreen? = nil) -> NSRect {
         var rect = frameRect
         if locksHeight {
             rect.size.height = TaskbarMetrics.barHeight
         }
-        if let screen {
-            rect.origin.y = screen.frame.minY
+        let target = preferredScreen
+            ?? NSScreen.screens.first(where: { abs($0.frame.minX - rect.minX) < 2 && $0.frame.width + 2 >= rect.width })
+            ?? NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: rect.midX, y: rect.minY + 1)) })
+        if let target {
+            rect.origin.y = target.frame.minY
         }
         return rect
     }

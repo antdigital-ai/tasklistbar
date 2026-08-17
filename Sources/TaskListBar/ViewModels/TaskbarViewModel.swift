@@ -21,6 +21,7 @@ final class TaskbarViewModel: ObservableObject {
     @Published var showsAllApps = false
     @Published var calendarNavigate = CalendarNavigate()
     @Published private(set) var appStripAvailableWidth: CGFloat = 0
+    private var unpinnedOrder: [String] = []
 
     struct CalendarNavigate: Equatable {
         var generation = 0
@@ -167,7 +168,6 @@ final class TaskbarViewModel: ObservableObject {
         let running = appMonitor.runningApps
         let frontID = appMonitor.frontmostBundleID
         let frontWindowID = appMonitor.windowCatalog.frontmostWindowID
-        let pinned = pinnedStore.pinnedBundleIDs
         let catalog = appMonitor.windowCatalog
         let showBadges = appSettings.showBadges
 
@@ -186,118 +186,171 @@ final class TaskbarViewModel: ObservableObject {
             let windows: [CatalogWindow]
         }
 
-        var entries: [AppEntry] = []
-        var seen = Set<String>()
-        seen.reserveCapacity(pinned.count + running.count)
+        enum StripEntry {
+            case app(AppEntry)
+            case folder(PinnedItem, url: URL?)
+        }
 
-        for bid in pinned {
+        var entries: [StripEntry] = []
+        var seen = Set<String>()
+        seen.reserveCapacity(pinnedStore.items.count + running.count)
+
+        for pin in pinnedStore.items {
+            if pin.isFolder {
+                entries.append(.folder(pin, url: pinnedStore.resolvedURL(for: pin)))
+                continue
+            }
+            let bid = pin.bundleID ?? pin.id
             seen.insert(bid)
             entries.append(
-                AppEntry(
-                    bid: bid,
-                    running: runningByID[bid],
-                    isPinned: true,
-                    windows: catalog.windows(for: bid)
+                .app(
+                    AppEntry(
+                        bid: bid,
+                        running: runningByID[bid],
+                        isPinned: true,
+                        windows: catalog.windows(for: bid)
+                    )
                 )
             )
         }
-        for app in running {
+        var unpinned: [(offset: Int, app: NSRunningApplication, bid: String)] = []
+        for (offset, app) in running.enumerated() {
             guard let bid = app.bundleIdentifier, !seen.contains(bid) else { continue }
             seen.insert(bid)
+            unpinned.append((offset, app, bid))
+        }
+        unpinned.sort { lhs, rhs in
+            let left = unpinnedOrder.firstIndex(of: lhs.bid) ?? (10_000 + lhs.offset)
+            let right = unpinnedOrder.firstIndex(of: rhs.bid) ?? (10_000 + rhs.offset)
+            return left < right
+        }
+        for item in unpinned {
             entries.append(
-                AppEntry(
-                    bid: bid,
-                    running: app,
-                    isPinned: false,
-                    windows: catalog.windows(for: bid)
+                .app(
+                    AppEntry(
+                        bid: item.bid,
+                        running: item.app,
+                        isPinned: false,
+                        windows: catalog.windows(for: item.bid)
+                    )
                 )
             )
         }
 
-        let grouped = shouldGroup(windowCounts: entries.map(\.windows.count))
+        let grouped = shouldGroup(
+            windowCounts: entries.map { entry in
+                if case .app(let app) = entry { return app.windows.count }
+                return 0
+            }
+        )
 
         var signatureParts: [String] = []
         signatureParts.reserveCapacity(entries.count)
         for entry in entries {
-            let badge = showBadges ? catalog.badges[entry.bid] ?? 0 : 0
-            let progress = Int((catalog.progress[entry.bid] ?? -1) * 100)
-            let hung = entry.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
-            let active = (frontID == entry.bid || (isWindowListOpen && windowListBundleID == entry.bid)) ? 1 : 0
-            let windowPart = grouped
-                ? "g\(entry.windows.count)"
-                : entry.windows.map { "\($0.windowID):\($0.title)" }.joined(separator: "+")
-            signatureParts.append(
-                "\(entry.bid):\(entry.running == nil ? 0 : 1)\(active)\(entry.isPinned ? 1 : 0)|\(windowPart)|\(badge)|\(progress)|\(hung ? 1 : 0)|\(grouped ? 1 : 0)"
-            )
+            switch entry {
+            case .folder(let pin, let url):
+                signatureParts.append("folder:\(pin.id):\(pin.name):\(url?.path ?? "")")
+            case .app(let app):
+                let badge = showBadges ? catalog.badges[app.bid] ?? 0 : 0
+                let progress = Int((catalog.progress[app.bid] ?? -1) * 100)
+                let hung = app.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
+                let active = (frontID == app.bid || (isWindowListOpen && windowListBundleID == app.bid)) ? 1 : 0
+                let windowPart = grouped
+                    ? "g\(app.windows.count)"
+                    : app.windows.map { "\($0.windowID):\($0.title)" }.joined(separator: "+")
+                signatureParts.append(
+                    "\(app.bid):\(app.running == nil ? 0 : 1)\(active)\(app.isPinned ? 1 : 0)|\(windowPart)|\(badge)|\(progress)|\(hung ? 1 : 0)|\(grouped ? 1 : 0)"
+                )
+            }
         }
-        let signature = signatureParts.joined(separator: ",") + "@\(Int(appStripAvailableWidth))"
+        let signature = signatureParts.joined(separator: ",")
+            + "@\(Int(appStripAvailableWidth))"
+            + "|u:\(unpinnedOrder.joined(separator: ","))"
         guard signature != lastItemsSignature else { return }
         lastItemsSignature = signature
 
         var result: [TaskbarAppItem] = []
-        result.reserveCapacity(grouped ? entries.count : entries.reduce(0) { $0 + max($1.windows.count, 1) })
+        result.reserveCapacity(entries.count)
 
         for entry in entries {
-            let url = entry.running?.bundleURL ?? AppIconCache.url(forBundleID: entry.bid)
-            let name = AppIconCache.displayName(
-                forBundleID: entry.bid,
-                url: url,
-                runningName: entry.running?.localizedName
-            )
-            let icon = AppIconCache.icon(
-                forBundleID: entry.bid,
-                url: url,
-                fallback: entry.running?.icon,
-                size: 64
-            )
-            let unread = showBadges ? catalog.badges[entry.bid] : nil
-            let progress = catalog.progress[entry.bid]
-            let hung = entry.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
+            switch entry {
+            case .folder(let pin, let url):
+                let icon = url.map { AppIconCache.icon(forFile: $0.path, size: 64) }
+                    ?? NSImage(systemSymbolName: "folder.fill", accessibilityDescription: pin.name)
+                result.append(
+                    AppItemFactory.make(
+                        bundleIdentifier: pin.id,
+                        name: pin.name,
+                        icon: icon,
+                        url: url,
+                        isRunning: false,
+                        isActive: false,
+                        isPinned: true,
+                        isFolder: true
+                    )
+                )
+            case .app(let app):
+                let url = app.running?.bundleURL ?? AppIconCache.url(forBundleID: app.bid)
+                let name = AppIconCache.displayName(
+                    forBundleID: app.bid,
+                    url: url,
+                    runningName: app.running?.localizedName
+                )
+                let icon = AppIconCache.icon(
+                    forBundleID: app.bid,
+                    url: url,
+                    fallback: app.running?.icon,
+                    size: 64
+                )
+                let unread = showBadges ? catalog.badges[app.bid] : nil
+                let progress = catalog.progress[app.bid]
+                let hung = app.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
 
-            if !grouped, !entry.windows.isEmpty {
-                for (index, window) in entry.windows.enumerated() {
+                if !grouped, !app.windows.isEmpty {
+                    for (index, window) in app.windows.enumerated() {
+                        result.append(
+                            AppItemFactory.make(
+                                bundleIdentifier: app.bid,
+                                name: name,
+                                icon: icon,
+                                url: url,
+                                isRunning: true,
+                                isActive: (frontID == app.bid || (isWindowListOpen && windowListBundleID == app.bid))
+                                    && (frontWindowID == window.windowID || (frontWindowID == nil && index == 0)),
+                                isPinned: app.isPinned,
+                                processIdentifier: window.pid,
+                                windowID: window.windowID,
+                                windowIndex: window.axIndex,
+                                windowTitle: window.displayTitle(index: index),
+                                windowCount: app.windows.count,
+                                badge: index == 0 ? unread : nil,
+                                badgeIsUnread: index == 0 && unread != nil,
+                                progress: index == 0 ? progress : nil,
+                                isUnresponsive: hung,
+                                isGrouped: false
+                            )
+                        )
+                    }
+                } else {
                     result.append(
                         AppItemFactory.make(
-                            bundleIdentifier: entry.bid,
+                            bundleIdentifier: app.bid,
                             name: name,
                             icon: icon,
                             url: url,
-                            isRunning: true,
-                            isActive: (frontID == entry.bid || (isWindowListOpen && windowListBundleID == entry.bid))
-                                && (frontWindowID == window.windowID || (frontWindowID == nil && index == 0)),
-                            isPinned: entry.isPinned,
-                            processIdentifier: window.pid,
-                            windowID: window.windowID,
-                            windowIndex: window.axIndex,
-                            windowTitle: window.displayTitle(index: index),
-                            windowCount: entry.windows.count,
-                            badge: index == 0 ? unread : nil,
-                            badgeIsUnread: index == 0 && unread != nil,
-                            progress: index == 0 ? progress : nil,
+                            isRunning: app.running != nil,
+                            isActive: frontID == app.bid || (isWindowListOpen && windowListBundleID == app.bid),
+                            isPinned: app.isPinned,
+                            processIdentifier: app.running?.processIdentifier,
+                            windowCount: app.windows.count,
+                            badge: unread,
+                            badgeIsUnread: unread != nil,
+                            progress: progress,
                             isUnresponsive: hung,
-                            isGrouped: false
+                            isGrouped: true
                         )
                     )
                 }
-            } else {
-                result.append(
-                    AppItemFactory.make(
-                        bundleIdentifier: entry.bid,
-                        name: name,
-                        icon: icon,
-                        url: url,
-                        isRunning: entry.running != nil,
-                        isActive: frontID == entry.bid || (isWindowListOpen && windowListBundleID == entry.bid),
-                        isPinned: entry.isPinned,
-                        processIdentifier: entry.running?.processIdentifier,
-                        windowCount: entry.windows.count,
-                        badge: unread,
-                        badgeIsUnread: unread != nil,
-                        progress: progress,
-                        isUnresponsive: hung,
-                        isGrouped: true
-                    )
-                )
             }
         }
 
@@ -319,6 +372,15 @@ final class TaskbarViewModel: ObservableObject {
     }
 
     func select(_ item: TaskbarAppItem) {
+        if item.isFolder {
+            closeOverlays()
+            if let pin = pinnedStore.item(id: item.id) {
+                pinnedStore.openFolder(pin)
+            } else if let url = item.url {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
         if item.isGrouped, item.isRunning, item.windowCount >= 2 {
             if item.isActive {
                 if isWindowListOpen, windowListBundleID == item.bundleIdentifier {
@@ -518,11 +580,71 @@ final class TaskbarViewModel: ObservableObject {
     }
 
     func pin(_ item: TaskbarAppItem) {
+        if item.isFolder { return }
         pinnedStore.pin(item.bundleIdentifier)
     }
 
     func unpin(_ item: TaskbarAppItem) {
-        pinnedStore.unpin(item.bundleIdentifier)
+        pinnedStore.unpin(item.id)
+    }
+
+    func revealPinnedFolder(_ item: TaskbarAppItem) {
+        guard item.isFolder, let pin = pinnedStore.item(id: item.id) else { return }
+        pinnedStore.revealFolder(pin)
+    }
+
+    func handleTaskbarFileDrop(_ providers: [NSItemProvider], before targetID: String? = nil) -> Bool {
+        DroppedFileURLs.load(providers) { [weak self] url in
+            guard let self else { return }
+            if url.pathExtension.lowercased() == "app",
+               let bid = Bundle(url: url)?.bundleIdentifier {
+                self.pinnedStore.pin(bid, before: targetID)
+            } else if self.pinnedStore.pinFolder(url: url, before: targetID) {
+                return
+            } else {
+                self.favoritesStore.add(url: url)
+            }
+        }
+    }
+
+    func reorderIcons(draggedID: String, onto targetID: String) {
+        guard draggedID != targetID else { return }
+        let draggedPinned = pinnedStore.isPinned(draggedID)
+        let targetPinned = pinnedStore.isPinned(targetID)
+
+        if draggedPinned, targetPinned {
+            pinnedStore.reorder(draggedID: draggedID, targetID: targetID)
+            return
+        }
+        if !draggedPinned, targetPinned {
+            pinnedStore.pin(draggedID, before: targetID)
+            return
+        }
+        if draggedPinned, !targetPinned {
+            pinnedStore.moveToEnd(draggedID)
+            return
+        }
+
+        var order = currentUnpinnedIDs()
+        if !order.contains(draggedID) { order.append(draggedID) }
+        if !order.contains(targetID) { order.append(targetID) }
+        guard let from = order.firstIndex(of: draggedID),
+              let to = order.firstIndex(of: targetID)
+        else { return }
+        order.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        unpinnedOrder = order
+        lastItemsSignature = ""
+        rebuildItems()
+    }
+
+    private func currentUnpinnedIDs() -> [String] {
+        var seen = Set<String>()
+        return items.compactMap { item in
+            guard !item.isPinned, !item.isFolder else { return nil }
+            if seen.contains(item.bundleIdentifier) { return nil }
+            seen.insert(item.bundleIdentifier)
+            return item.bundleIdentifier
+        }
     }
 
     func quit(_ item: TaskbarAppItem) {
