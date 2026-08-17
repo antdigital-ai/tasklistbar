@@ -16,6 +16,8 @@ final class TaskbarViewModel: ObservableObject {
     @Published var windowListAppName = ""
     @Published var windowListIcon = NSImage()
     @Published var windowListAnchorX: CGFloat = 0
+    @Published var windowListHighlightedID: CGWindowID?
+    @Published var windowListActiveWindowID: CGWindowID?
     @Published var showsAllApps = false
     @Published var calendarNavigate = CalendarNavigate()
     @Published private(set) var appStripAvailableWidth: CGFloat = 0
@@ -220,7 +222,7 @@ final class TaskbarViewModel: ObservableObject {
             let badge = showBadges ? catalog.badges[entry.bid] ?? 0 : 0
             let progress = Int((catalog.progress[entry.bid] ?? -1) * 100)
             let hung = entry.running.map { catalog.unresponsivePIDs.contains($0.processIdentifier) } ?? false
-            let active = frontID == entry.bid ? 1 : 0
+            let active = (frontID == entry.bid || (isWindowListOpen && windowListBundleID == entry.bid)) ? 1 : 0
             let windowPart = grouped
                 ? "g\(entry.windows.count)"
                 : entry.windows.map { "\($0.windowID):\($0.title)" }.joined(separator: "+")
@@ -261,7 +263,8 @@ final class TaskbarViewModel: ObservableObject {
                             icon: icon,
                             url: url,
                             isRunning: true,
-                            isActive: frontID == entry.bid && (frontWindowID == window.windowID || (frontWindowID == nil && index == 0)),
+                            isActive: (frontID == entry.bid || (isWindowListOpen && windowListBundleID == entry.bid))
+                                && (frontWindowID == window.windowID || (frontWindowID == nil && index == 0)),
                             isPinned: entry.isPinned,
                             processIdentifier: window.pid,
                             windowID: window.windowID,
@@ -284,7 +287,7 @@ final class TaskbarViewModel: ObservableObject {
                         icon: icon,
                         url: url,
                         isRunning: entry.running != nil,
-                        isActive: frontID == entry.bid,
+                        isActive: frontID == entry.bid || (isWindowListOpen && windowListBundleID == entry.bid),
                         isPinned: entry.isPinned,
                         processIdentifier: entry.running?.processIdentifier,
                         windowCount: entry.windows.count,
@@ -339,12 +342,37 @@ final class TaskbarViewModel: ObservableObject {
         windowListAppName = item.name
         windowListIcon = item.icon
         windowListAnchorX = NSEvent.mouseLocation.x
+        let windows = appMonitor.windowCatalog.windows(for: item.bundleIdentifier)
+        let current = appMonitor.windowCatalog.frontmostWindowID
+        windowListActiveWindowID = current
+        windowListHighlightedID = current ?? windows.first?.windowID
         isWindowListOpen = true
     }
 
     func closeWindowList() {
         isWindowListOpen = false
         windowListBundleID = nil
+        windowListHighlightedID = nil
+        windowListActiveWindowID = nil
+    }
+
+    func moveWindowListHighlight(_ delta: Int) {
+        guard let bid = windowListBundleID else { return }
+        let windows = appMonitor.windowCatalog.windows(for: bid)
+        guard !windows.isEmpty else { return }
+        let current = windowListHighlightedID.flatMap { id in
+            windows.firstIndex(where: { $0.windowID == id })
+        } ?? 0
+        let next = (current + delta + windows.count) % windows.count
+        windowListHighlightedID = windows[next].windowID
+    }
+
+    func confirmWindowListHighlight() {
+        guard let bid = windowListBundleID,
+              let id = windowListHighlightedID,
+              let window = appMonitor.windowCatalog.windows(for: bid).first(where: { $0.windowID == id })
+        else { return }
+        pickWindow(window)
     }
 
     func pickWindow(_ window: CatalogWindow) {

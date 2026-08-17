@@ -138,6 +138,7 @@ struct BluetoothTrayButton: View {
 
     var body: some View {
         Button {
+            NSApp.activate(ignoringOtherApps: true)
             showingFlyout.toggle()
         } label: {
             ZStack(alignment: .topTrailing) {
@@ -355,6 +356,7 @@ struct BluetoothFlyout: View {
         }
         .padding(12)
         .frame(width: 240)
+        .background(PopoverKeyGrabber())
     }
 }
 
@@ -463,6 +465,7 @@ struct VolumeFlyout: View {
         }
         .padding(12)
         .frame(width: 260)
+        .background(PopoverKeyGrabber(preferSlider: true))
     }
 }
 
@@ -563,6 +566,68 @@ private struct VolumeSlider: NSViewRepresentable {
     }
 }
 
+/// Makes a SwiftUI popover the key window so it is selected as soon as it opens.
+private struct PopoverKeyGrabber: NSViewRepresentable {
+    var preferSlider = false
+
+    func makeNSView(context: Context) -> KeyGrabberView {
+        let view = KeyGrabberView()
+        view.preferSlider = preferSlider
+        return view
+    }
+
+    func updateNSView(_ view: KeyGrabberView, context: Context) {
+        view.preferSlider = preferSlider
+    }
+}
+
+private final class KeyGrabberView: NSView {
+    var preferSlider = false
+    private var didGrab = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else {
+            didGrab = false
+            return
+        }
+        grabKey()
+    }
+
+    private func grabKey() {
+        guard let window, !didGrab else { return }
+        didGrab = true
+        DispatchQueue.main.async { [weak self] in
+            self?.makePopoverKey(window)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, let window = self.window else { return }
+            self.makePopoverKey(window)
+        }
+    }
+
+    private func makePopoverKey(_ window: NSWindow) {
+        NSApp.activate(ignoringOtherApps: true)
+        if let panel = window as? NSPanel {
+            panel.becomesKeyOnlyIfNeeded = false
+        }
+        window.makeKeyAndOrderFront(nil)
+        if preferSlider, let slider = Self.firstSlider(in: window.contentView) {
+            window.makeFirstResponder(slider)
+        }
+    }
+
+    private static func firstSlider(in view: NSView?) -> NSSlider? {
+        guard let view else { return nil }
+        if let slider = view as? NSSlider { return slider }
+        for subview in view.subviews {
+            if let slider = firstSlider(in: subview) { return slider }
+        }
+        return nil
+    }
+}
+
 private final class FirstMouseSlider: NSSlider {
+    override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

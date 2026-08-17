@@ -19,7 +19,7 @@ struct WindowListView: View {
                             .foregroundStyle(Color.primary.opacity(window.isMinimized ? 0.45 : 0.92))
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        if window.windowID == catalog.frontmostWindowID {
+                        if window.windowID == viewModel.windowListActiveWindowID {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundStyle(.primary.opacity(0.45))
@@ -27,7 +27,7 @@ struct WindowListView: View {
                     }
                     .padding(.horizontal, 8)
                     .frame(height: 22)
-                    .background(window.windowID == catalog.frontmostWindowID ? TaskbarTheme.activeFill : Color.clear)
+                    .background(window.windowID == viewModel.windowListHighlightedID ? TaskbarTheme.activeFill : Color.clear)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -38,7 +38,9 @@ struct WindowListView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.primary.opacity(0.45))
                     .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: 22)
+                    .background(TaskbarTheme.activeFill)
             }
         }
         .padding(.vertical, 4)

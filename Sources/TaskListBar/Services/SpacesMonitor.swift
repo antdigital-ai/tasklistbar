@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreGraphics
 import Darwin
 import Foundation
 
@@ -7,34 +8,52 @@ import Foundation
 final class SpacesMonitor: ObservableObject {
     @Published private(set) var currentSpace: Int = 1
     @Published private(set) var spaceCount: Int = 1
+    @Published private(set) var isFullscreenSpace = false
 
-    private var observer: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
     private var debounceTask: Task<Void, Never>?
 
     func start() {
         refresh()
-        observer = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.scheduleRefresh()
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers.append(
+            workspace.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.scheduleRefresh()
+                }
             }
-        }
+        )
+        observers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.scheduleRefresh()
+                }
+            }
+        )
     }
 
     func stop() {
         debounceTask?.cancel()
         debounceTask = nil
-        if let observer {
-            NSWorkspace.shared.notificationCenter.removeObserver(observer)
-            self.observer = nil
+        let workspace = NSWorkspace.shared.notificationCenter
+        for observer in observers {
+            workspace.removeObserver(observer)
+            NotificationCenter.default.removeObserver(observer)
         }
+        observers.removeAll()
     }
 
     private func scheduleRefresh() {
         debounceTask?.cancel()
+        refresh()
         debounceTask = Task { [weak self] in
             // SkyLight sometimes reports the previous space immediately after the notification.
             try? await Task.sleep(nanoseconds: 120_000_000)
@@ -47,7 +66,7 @@ final class SpacesMonitor: ObservableObject {
     }
 
     func refresh() {
-        guard let info = SpaceAPI.readSpaces() else { return }
+        guard let info = SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main)) else { return }
         let nextCurrent = info.current
         let nextCount = max(info.count, 1)
         if nextCurrent != currentSpace {
@@ -56,6 +75,18 @@ final class SpacesMonitor: ObservableObject {
         if nextCount != spaceCount {
             spaceCount = nextCount
         }
+        if info.isFullscreen != isFullscreenSpace {
+            isFullscreenSpace = info.isFullscreen
+        }
+    }
+
+    private static func displayUUID(for screen: NSScreen?) -> String? {
+        guard let screen,
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else { return nil }
+        let displayID = CGDirectDisplayID(truncating: number)
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() else { return nil }
+        return CFUUIDCreateString(nil, uuid) as String
     }
 
     func openMissionControl() {
@@ -89,36 +120,59 @@ private enum SpaceAPI {
         )
     }()
 
-    nonisolated static func readSpaces() -> (current: Int, count: Int)? {
-        guard let symbols else { return (1, 1) }
+    /// SkyLight space types: 0 user desktop, 2 system (Mission Control), 4 fullscreen.
+    private static let fullscreenSpaceType = 4
+
+    nonisolated static func readSpaces(displayUUID: String?) -> (current: Int, count: Int, isFullscreen: Bool)? {
+        guard let symbols else { return (1, 1, false) }
         let connection = symbols.main()
-        guard let unmanaged = symbols.copy(connection) else { return (1, 1) }
+        guard let unmanaged = symbols.copy(connection) else { return (1, 1, false) }
         let displays = unmanaged.takeRetainedValue() as NSArray
 
-        guard let first = displays.firstObject as? NSDictionary,
-              let spaces = first["Spaces"] as? [NSDictionary],
+        guard let display = pickDisplay(displays, uuid: displayUUID),
+              let spaces = display["Spaces"] as? [NSDictionary],
               !spaces.isEmpty
         else {
-            return (1, 1)
+            return (1, 1, false)
         }
 
+        let currentSpace = display["Current Space"] as? NSDictionary
         let currentID: Any? = {
-            if let dict = first["Current Space"] as? NSDictionary {
-                return dict["ManagedSpaceID"] ?? dict["id64"]
+            if let currentSpace {
+                return currentSpace["ManagedSpaceID"] ?? currentSpace["id64"]
             }
-            return first["Current Space"]
+            return display["Current Space"]
         }()
+        let currentType = currentSpace?["type"] as? Int
 
         var index = 1
+        var matchedType = currentType
         for (offset, space) in spaces.enumerated() {
             let sid = space["ManagedSpaceID"] ?? space["id64"]
             if let currentID, isEqualSpaceID(sid, currentID) {
                 index = offset + 1
+                if let type = space["type"] as? Int {
+                    matchedType = type
+                }
                 break
             }
         }
 
-        return (index, spaces.count)
+        return (index, spaces.count, matchedType == fullscreenSpaceType)
+    }
+
+    nonisolated private static func pickDisplay(_ displays: NSArray, uuid: String?) -> NSDictionary? {
+        if let uuid {
+            for item in displays {
+                guard let dict = item as? NSDictionary,
+                      let identifier = dict["Display Identifier"] as? String
+                else { continue }
+                if identifier.caseInsensitiveCompare(uuid) == .orderedSame {
+                    return dict
+                }
+            }
+        }
+        return displays.firstObject as? NSDictionary
     }
 
     nonisolated private static func isEqualSpaceID(_ lhs: Any?, _ rhs: Any?) -> Bool {

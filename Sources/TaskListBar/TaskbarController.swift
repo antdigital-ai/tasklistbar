@@ -54,6 +54,7 @@ final class TaskbarController: NSObject {
         observeHotkeys()
         observeWindowAvoidance()
         observeBarSize()
+        observeFullscreenSpace()
         viewModel.startTrayMonitors()
         prewarmStartMenu()
 
@@ -266,6 +267,7 @@ final class TaskbarController: NSObject {
     }
 
     @objc private func statusShowTaskbar() {
+        guard !viewModel.spacesMonitor.isFullscreenSpace else { return }
         layoutPanels()
         panel?.orderFrontRegardless()
     }
@@ -294,7 +296,7 @@ final class TaskbarController: NSObject {
         )
         // High enough to sit above Dock and third-party bars like uBar.
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)))
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -480,7 +482,11 @@ final class TaskbarController: NSObject {
     private func layoutPanels() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         panel?.setFrame(taskbarFrame(on: screen), display: true)
-        panel?.orderFrontRegardless()
+        if viewModel.spacesMonitor.isFullscreenSpace {
+            panel?.orderOut(nil)
+        } else {
+            panel?.orderFrontRegardless()
+        }
         layoutOverlays(on: screen, animated: false)
     }
 
@@ -586,11 +592,16 @@ final class TaskbarController: NSObject {
     private func syncWindowListVisibility() {
         if viewModel.isWindowListOpen {
             createWindowListPanelIfNeeded()
+            NSApp.activate(ignoringOtherApps: true)
             animatePanel(
                 windowListPanel,
                 show: true,
                 target: windowListTargetFrame()
-            )
+            ) { [weak self] in
+                guard let self, self.viewModel.isWindowListOpen else { return }
+                self.windowListPanel?.makeKeyAndOrderFront(nil)
+            }
+            windowListPanel?.makeKeyAndOrderFront(nil)
         } else {
             animatePanel(
                 windowListPanel,
@@ -908,6 +919,25 @@ final class TaskbarController: NSObject {
         )
     }
 
+    private func observeFullscreenSpace() {
+        viewModel.spacesMonitor.$isFullscreenSpace
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] fullscreen in
+                self?.setTaskbarHiddenForFullscreen(fullscreen)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func setTaskbarHiddenForFullscreen(_ hidden: Bool) {
+        if hidden {
+            viewModel.closeOverlays()
+            panel?.orderOut(nil)
+        } else {
+            layoutPanels()
+        }
+    }
+
     private func observeScreens() {
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -1067,6 +1097,22 @@ final class TaskbarController: NSObject {
                 return nil
             }
             return event
+        }
+
+        if viewModel.isWindowListOpen, modifiers.isEmpty {
+            switch event.keyCode {
+            case 125:
+                viewModel.moveWindowListHighlight(1)
+                return nil
+            case 126:
+                viewModel.moveWindowListHighlight(-1)
+                return nil
+            case 36, 76:
+                viewModel.confirmWindowListHighlight()
+                return nil
+            default:
+                break
+            }
         }
 
         guard viewModel.isCalendarOpen, !viewModel.isSettingsOpen, modifiers.isEmpty else {
