@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Combine
 import CoreGraphics
 import Darwin
@@ -9,6 +10,8 @@ final class SpacesMonitor: ObservableObject {
     @Published private(set) var currentSpace: Int = 1
     @Published private(set) var spaceCount: Int = 1
     @Published private(set) var isFullscreenSpace = false
+    var onFullscreenDetected: (() -> Void)?
+    var onActiveSpaceChanged: (() -> Void)?
 
     private var observers: [NSObjectProtocol] = []
     private var debounceTask: Task<Void, Never>?
@@ -22,8 +25,24 @@ final class SpacesMonitor: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in
-                    self?.scheduleRefresh()
+                guard let self else { return }
+                MainActor.assumeIsolated {
+                    AppLog.info("event=spaceChange", category: "fullscreen")
+                    self.probeAndApplyFullscreen(reason: "spaceChange")
+                    self.onActiveSpaceChanged?()
+                    self.scheduleRefresh()
+                }
+            }
+        )
+        observers.append(
+            workspace.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                MainActor.assumeIsolated {
+                    self.probeAndApplyFullscreen(reason: "appActivate")
                 }
             }
         )
@@ -33,8 +52,10 @@ final class SpacesMonitor: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in
-                    self?.refresh(updateFullscreen: false)
+                guard let self else { return }
+                MainActor.assumeIsolated {
+                    self.probeAndApplyFullscreen(reason: "screenParams")
+                    self.refresh(updateFullscreen: false)
                 }
             }
         )
@@ -55,14 +76,28 @@ final class SpacesMonitor: ObservableObject {
         debounceTask?.cancel()
         refresh(updateFullscreen: false)
         debounceTask = Task { [weak self] in
-            // SkyLight sometimes reports the previous space immediately after the notification.
+            for _ in 0..<8 {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self?.probeAndApplyFullscreen(reason: "poll") }
+            }
             try? await Task.sleep(nanoseconds: 120_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run { self?.refresh() }
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { self?.refresh() }
         }
+    }
+
+    func probeAndApplyFullscreen(reason: String = "probe") {
+        guard looksFullscreenNow(), !isFullscreenSpace else { return }
+        AppLog.info("hide now reason=\(reason) \(snapshot())", category: "fullscreen")
+        isFullscreenSpace = true
+        onFullscreenDetected?()
+    }
+
+    func looksFullscreenNow() -> Bool {
+        if NSApp.currentSystemPresentationOptions.contains(.fullScreen) { return true }
+        if Self.isAXFullscreen() { return true }
+        return SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main))?.isFullscreen == true
     }
 
     func refresh(updateFullscreen: Bool = true) {
@@ -75,9 +110,44 @@ final class SpacesMonitor: ObservableObject {
         if nextCount != spaceCount {
             spaceCount = nextCount
         }
-        if updateFullscreen, info.isFullscreen != isFullscreenSpace {
-            isFullscreenSpace = info.isFullscreen
+        if updateFullscreen {
+            let next = info.isFullscreen || Self.isAXFullscreen()
+                || NSApp.currentSystemPresentationOptions.contains(.fullScreen)
+            if next != isFullscreenSpace {
+                AppLog.info(
+                    "set isFullscreenSpace \(isFullscreenSpace) -> \(next) sky=\(info.isFullscreen) type=\(info.type) \(snapshot())",
+                    category: "fullscreen"
+                )
+                isFullscreenSpace = next
+            }
         }
+    }
+
+    private func snapshot() -> String {
+        let info = SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main))
+        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+        return "sky=\(info?.isFullscreen ?? false) type=\(info?.type ?? -1) front=\(front) space=\(currentSpace)/\(spaceCount)"
+    }
+
+    private static func isAXFullscreen() -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier != Bundle.main.bundleIdentifier
+        else { return false }
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.1)
+        if let windows = AXHelper.children(element, attribute: kAXWindowsAttribute as CFString) {
+            for window in windows {
+                if AXHelper.bool(window, "AXFullScreen" as CFString) == true { return true }
+            }
+        }
+        for attribute in [kAXFocusedWindowAttribute as CFString, kAXMainWindowAttribute as CFString] {
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success, let ref else { continue }
+            let window = ref as! AXUIElement
+            if AXHelper.bool(window, "AXFullScreen" as CFString) == true { return true }
+        }
+        return false
     }
 
     private static func displayUUID(for screen: NSScreen?) -> String? {
@@ -123,17 +193,17 @@ private enum SpaceAPI {
     /// SkyLight space types: 0 user desktop, 2 system (Mission Control), 4 fullscreen.
     private static let fullscreenSpaceType = 4
 
-    nonisolated static func readSpaces(displayUUID: String?) -> (current: Int, count: Int, isFullscreen: Bool)? {
-        guard let symbols else { return (1, 1, false) }
+    nonisolated static func readSpaces(displayUUID: String?) -> (current: Int, count: Int, isFullscreen: Bool, type: Int, matchedInList: Bool)? {
+        guard let symbols else { return (1, 1, false, 0, false) }
         let connection = symbols.main()
-        guard let unmanaged = symbols.copy(connection) else { return (1, 1, false) }
+        guard let unmanaged = symbols.copy(connection) else { return (1, 1, false, 0, false) }
         let displays = unmanaged.takeRetainedValue() as NSArray
 
         guard let display = pickDisplay(displays, uuid: displayUUID),
               let spaces = display["Spaces"] as? [NSDictionary],
               !spaces.isEmpty
         else {
-            return (1, 1, false)
+            return (1, 1, false, 0, false)
         }
 
         let currentSpace = display["Current Space"] as? NSDictionary
@@ -147,10 +217,12 @@ private enum SpaceAPI {
 
         var index = 1
         var matchedType = currentType
+        var matchedInList = false
         for (offset, space) in spaces.enumerated() {
             let sid = space["ManagedSpaceID"] ?? space["id64"]
             if let currentID, isEqualSpaceID(sid, currentID) {
                 index = offset + 1
+                matchedInList = true
                 if let type = space["type"] as? Int {
                     matchedType = type
                 }
@@ -158,7 +230,8 @@ private enum SpaceAPI {
             }
         }
 
-        return (index, spaces.count, matchedType == fullscreenSpaceType)
+        let type = matchedType ?? -1
+        return (index, spaces.count, type == fullscreenSpaceType, type, matchedInList)
     }
 
     nonisolated private static func pickDisplay(_ displays: NSArray, uuid: String?) -> NSDictionary? {

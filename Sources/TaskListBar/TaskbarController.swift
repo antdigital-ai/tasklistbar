@@ -22,6 +22,7 @@ final class TaskbarController: NSObject {
     private var hotkeyCenter = HotkeyCenter()
     private let windowAvoider = WindowAvoider()
     private var cancellables = Set<AnyCancellable>()
+    private var spaceAttachTask: Task<Void, Never>?
 
     init(
         appMonitor: AppMonitor,
@@ -48,7 +49,7 @@ final class TaskbarController: NSObject {
     func show() {
         createStatusItem()
         createTaskbarPanel()
-        layoutPanels()
+        showTaskbarOnActiveDesktop()
         observeScreens()
         observeClicksOutside()
         observeHotkeys()
@@ -267,9 +268,10 @@ final class TaskbarController: NSObject {
     }
 
     @objc private func statusShowTaskbar() {
-        guard !viewModel.spacesMonitor.isFullscreenSpace else { return }
-        layoutPanels()
-        panel?.orderFrontRegardless()
+        guard !viewModel.spacesMonitor.isFullscreenSpace,
+              !viewModel.spacesMonitor.looksFullscreenNow()
+        else { return }
+        showTaskbarOnActiveDesktop()
     }
 
     @objc private func statusOpenLogs() {
@@ -296,7 +298,9 @@ final class TaskbarController: NSObject {
         )
         // High enough to sit above Dock and third-party bars like uBar.
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)))
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        // Stay on the current desktop only. Joining all spaces would flash the
+        // bar onto a fullscreen Space before we can hide it.
+        panel.collectionBehavior = [.stationary]
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -481,23 +485,52 @@ final class TaskbarController: NSObject {
     }
 
     private func layoutPanels() {
+        if viewModel.spacesMonitor.isFullscreenSpace || viewModel.spacesMonitor.looksFullscreenNow() {
+            hideTaskbarForFullscreen()
+            return
+        }
+        repositionTaskbarIfNeeded()
+        if panel?.isVisible == true {
+            panel?.alphaValue = 1
+            if let screen = NSScreen.main ?? NSScreen.screens.first {
+                layoutOverlays(on: screen, animated: false)
+            }
+        }
+    }
+
+    private func showTaskbarOnActiveDesktop() {
+        guard let panel else { return }
+        guard !viewModel.spacesMonitor.isFullscreenSpace,
+              !viewModel.spacesMonitor.looksFullscreenNow()
+        else {
+            hideTaskbarForFullscreen()
+            return
+        }
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let target = taskbarFrame(on: screen)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             context.allowsImplicitAnimation = false
-            if let panel, !Self.framesAlmostEqual(panel.frame, target) {
+            panel.collectionBehavior = [.moveToActiveSpace, .stationary]
+            if !Self.framesAlmostEqual(panel.frame, target) {
                 panel.setFrame(target, display: true)
             }
-        }
-        if viewModel.spacesMonitor.isFullscreenSpace {
-            if panel?.isVisible == true {
-                panel?.orderOut(nil)
-            }
-        } else if panel?.isVisible != true {
-            panel?.orderFrontRegardless()
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+            panel.collectionBehavior = [.stationary]
         }
         layoutOverlays(on: screen, animated: false)
+    }
+
+    private func repositionTaskbarIfNeeded() {
+        guard let panel, let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let target = taskbarFrame(on: screen)
+        guard !Self.framesAlmostEqual(panel.frame, target) else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            panel.setFrame(target, display: true)
+        }
     }
 
     private static func framesAlmostEqual(_ a: NSRect, _ b: NSRect) -> Bool {
@@ -937,7 +970,14 @@ final class TaskbarController: NSObject {
     }
 
     private func observeFullscreenSpace() {
+        viewModel.spacesMonitor.onFullscreenDetected = { [weak self] in
+            self?.hideTaskbarForFullscreen()
+        }
+        viewModel.spacesMonitor.onActiveSpaceChanged = { [weak self] in
+            self?.syncTaskbarToActiveSpace()
+        }
         viewModel.spacesMonitor.$isFullscreenSpace
+            .dropFirst()
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] fullscreen in
@@ -946,12 +986,39 @@ final class TaskbarController: NSObject {
             .store(in: &cancellables)
     }
 
+    private func syncTaskbarToActiveSpace() {
+        spaceAttachTask?.cancel()
+        if viewModel.spacesMonitor.looksFullscreenNow() || viewModel.spacesMonitor.isFullscreenSpace {
+            hideTaskbarForFullscreen()
+            return
+        }
+        // Wait for SkyLight to settle so we do not follow a new fullscreen Space.
+        spaceAttachTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 160_000_000)
+            guard let self, !Task.isCancelled else { return }
+            guard !self.viewModel.spacesMonitor.looksFullscreenNow(),
+                  !self.viewModel.spacesMonitor.isFullscreenSpace
+            else { return }
+            self.showTaskbarOnActiveDesktop()
+        }
+    }
+
     private func setTaskbarHiddenForFullscreen(_ hidden: Bool) {
-        if hidden {
-            viewModel.closeOverlays()
-            panel?.orderOut(nil)
+        if hidden || viewModel.spacesMonitor.looksFullscreenNow() {
+            hideTaskbarForFullscreen()
         } else {
-            layoutPanels()
+            showTaskbarOnActiveDesktop()
+        }
+    }
+
+    private func hideTaskbarForFullscreen() {
+        spaceAttachTask?.cancel()
+        viewModel.closeOverlays()
+        guard let panel else { return }
+        panel.alphaValue = 0
+        panel.collectionBehavior = [.stationary]
+        if panel.isVisible {
+            panel.orderOut(nil)
         }
     }
 
@@ -962,7 +1029,14 @@ final class TaskbarController: NSObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.layoutPanels()
+                guard let self else { return }
+                self.viewModel.spacesMonitor.probeAndApplyFullscreen(reason: "observeScreens")
+                if self.viewModel.spacesMonitor.isFullscreenSpace
+                    || self.viewModel.spacesMonitor.looksFullscreenNow() {
+                    self.hideTaskbarForFullscreen()
+                    return
+                }
+                self.layoutPanels()
             }
         }
     }
