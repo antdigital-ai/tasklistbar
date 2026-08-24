@@ -52,6 +52,7 @@ struct TaskbarRootView: View {
 
             SystemTrayView(
                 battery: viewModel.batteryMonitor,
+                boost: viewModel.boostService,
                 spaces: viewModel.spacesMonitor,
                 bluetooth: viewModel.bluetoothMonitor,
                 volume: viewModel.volumeMonitor,
@@ -65,6 +66,18 @@ struct TaskbarRootView: View {
         .frame(height: size.barHeight)
         .animation(TaskbarMotion.sizeChange, value: size)
         .modifier(TaskbarPointerLock())
+        .contextMenu {
+            Button {
+                viewModel.openActivityMonitor()
+            } label: {
+                Label("活动监视器", systemImage: "chart.bar.xaxis")
+            }
+            Button {
+                viewModel.openSettings()
+            } label: {
+                Label("任务栏设置", systemImage: "gearshape")
+            }
+        }
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(TaskbarTheme.hairline)

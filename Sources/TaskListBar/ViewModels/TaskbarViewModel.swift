@@ -37,6 +37,7 @@ final class TaskbarViewModel: ObservableObject {
     let spacesMonitor: SpacesMonitor
     let bluetoothMonitor: BluetoothMonitor
     let volumeMonitor: VolumeMonitor
+    let boostService = BoostService()
     let favoritesStore: FavoritesStore
     let clockModel = ClockModel()
     let calendarStore = CalendarStore()
@@ -514,6 +515,14 @@ final class TaskbarViewModel: ObservableObject {
         let calendar = URL(fileURLWithPath: "/System/Applications/Calendar.app")
         if FileManager.default.fileExists(atPath: calendar.path) {
             NSWorkspace.shared.open(calendar)
+        }
+    }
+
+    func openActivityMonitor() {
+        closeOverlays()
+        let url = URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.open(url)
         }
     }
 

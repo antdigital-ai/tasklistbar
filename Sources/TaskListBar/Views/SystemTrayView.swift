@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SystemTrayView: View {
     @ObservedObject var battery: BatteryMonitor
+    @ObservedObject var boost: BoostService
     @ObservedObject var spaces: SpacesMonitor
     @ObservedObject var bluetooth: BluetoothMonitor
     @ObservedObject var volume: VolumeMonitor
@@ -16,6 +17,8 @@ struct SystemTrayView: View {
             if battery.status.isPresent {
                 BatteryTrayButton(status: battery.status)
             }
+
+            BoostTrayButton(boost: boost)
 
             SpacesTrayButton(space: spaces.currentSpace, count: spaces.spaceCount) {
                 spaces.openMissionControl()
@@ -92,6 +95,166 @@ struct BatteryTrayButton: View {
             }
         }
         .help(helpText)
+    }
+}
+
+struct BoostTrayButton: View {
+    @ObservedObject var boost: BoostService
+    @Environment(\.taskbarSize) private var size
+    @State private var hovering = false
+    @State private var showingFlyout = false
+
+    private var helpText: String {
+        "加速：选择要关闭的编译 / AI 进程"
+    }
+
+    var body: some View {
+        Button {
+            NSApp.activate(ignoringOtherApps: true)
+            showingFlyout.toggle()
+        } label: {
+            Text("🚀")
+                .font(.system(size: size.traySymbol + 2))
+                .frame(width: size.trayHit, height: size.trayHit)
+                .background(
+                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
+                        .fill(showingFlyout || hovering ? TaskbarTheme.hover : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: size.corner, style: .continuous))
+        }
+        .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.92))
+        .onHover { hovering in
+            withAnimation(TaskbarMotion.hover) {
+                self.hovering = hovering
+            }
+        }
+        .help(helpText)
+        .popover(isPresented: $showingFlyout, arrowEdge: .top) {
+            BoostFlyout(boost: boost) {
+                showingFlyout = false
+            }
+        }
+    }
+}
+
+struct BoostFlyout: View {
+    @ObservedObject var boost: BoostService
+    let onClose: () -> Void
+    @Environment(\.taskbarAccent) private var accent
+    @State private var groups: [BoostService.ProcessGroup] = []
+    @State private var selected: Set<String> = []
+    @State private var didScan = false
+
+    private var selectedCount: Int {
+        groups.filter { selected.contains($0.label) }.reduce(0) { $0 + $1.count }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("加速清理")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 8)
+                Button {
+                    reload()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(0.75))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
+                .help("重新扫描")
+            }
+
+            if !didScan {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("扫描中…")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            } else if groups.isEmpty {
+                Text("没有发现可清理的进程")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(groups) { group in
+                        Toggle(isOn: binding(for: group.label)) {
+                            HStack(spacing: 8) {
+                                Text(group.label)
+                                    .font(.system(size: 12))
+                                Spacer(minLength: 8)
+                                Text("\(group.count)")
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .toggleStyle(.checkbox)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+
+            HStack {
+                Text("共 \(selectedCount) 个进程")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Button {
+                    let chosen = groups.filter { selected.contains($0.label) }
+                    boost.boost(groups: chosen)
+                    onClose()
+                } label: {
+                    Text("关闭选中")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule().fill(accent.color.opacity(selectedCount > 0 && !boost.isRunning ? 1 : 0.4))
+                        )
+                }
+                .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.94))
+                .disabled(selectedCount == 0 || boost.isRunning)
+            }
+        }
+        .padding(12)
+        .frame(width: 260)
+        .background(PopoverKeyGrabber())
+        .onAppear { reload() }
+    }
+
+    private func binding(for label: String) -> Binding<Bool> {
+        Binding(
+            get: { selected.contains(label) },
+            set: { on in
+                if on {
+                    selected.insert(label)
+                } else {
+                    selected.remove(label)
+                }
+            }
+        )
+    }
+
+    private func reload() {
+        didScan = false
+        Task { @MainActor in
+            let result = await boost.scan()
+            groups = result
+            selected = Set(result.map(\.label))
+            didScan = true
+        }
     }
 }
 
