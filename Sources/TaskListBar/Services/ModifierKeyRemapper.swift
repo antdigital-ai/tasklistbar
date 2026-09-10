@@ -19,6 +19,7 @@ final class ModifierKeyRemapper: ObservableObject {
     private var wakeObserver: NSObjectProtocol?
     private var hidManager: IOHIDManager?
     private var applyTask: Task<Void, Never>?
+    private var didClearGlobal = false
 
     private struct Store: Codable {
         var configurations: [String: ModifierKeyConfiguration] = [:]
@@ -28,10 +29,10 @@ final class ModifierKeyRemapper: ObservableObject {
 
     init() {
         loadStore()
-        refreshKeyboards()
+        startWatchingKeyboards()
+        refreshKeyboards(apply: false)
         applyAllConnected()
         observeWake()
-        startWatchingKeyboards()
     }
 
     deinit {
@@ -66,9 +67,12 @@ final class ModifierKeyRemapper: ObservableObject {
         updateSelected(.default)
     }
 
+    func prepareForDisplay() {
+        refreshKeyboards(apply: false)
+    }
+
     func reapply() {
-        refreshKeyboards()
-        applyAllConnected()
+        refreshKeyboards(apply: true)
     }
 
     private func updateSelected(_ next: ModifierKeyConfiguration) {
@@ -103,8 +107,11 @@ final class ModifierKeyRemapper: ObservableObject {
         }
     }
 
-    private func refreshKeyboards() {
-        var devices = Self.scanKeyboards()
+    private func refreshKeyboards(apply: Bool) {
+        var devices = devicesFromHID()
+        if devices.isEmpty {
+            devices = Self.scanKeyboards()
+        }
         let connectedIDs = Set(devices.map(\.id))
 
         for (id, name) in store.names where !connectedIDs.contains(id) {
@@ -152,16 +159,26 @@ final class ModifierKeyRemapper: ObservableObject {
         configuration = store.configurations[preferred] ?? .default
         persistStore()
 
-        if !newlyConnected.isEmpty {
+        if apply {
             applyAllConnected()
+        } else if !newlyConnected.isEmpty {
+            applyKeyboards(newlyConnected)
         }
     }
 
     private func applyAllConnected() {
-        clearGlobalMapping()
+        if !didClearGlobal {
+            clearGlobalMapping()
+            didClearGlobal = true
+        }
+        applyKeyboards(keyboards.filter(\.isConnected))
+    }
+
+    private func applyKeyboards(_ devices: [KeyboardDevice]) {
         var firstError: String?
-        for keyboard in keyboards where keyboard.isConnected {
+        for keyboard in devices {
             let config = store.configurations[keyboard.id] ?? .default
+            guard !config.isIdentity else { continue }
             do {
                 try setUserKeyMapping(buildUserKeyMapping(from: config), matching: keyboard)
             } catch {
@@ -291,9 +308,55 @@ final class ModifierKeyRemapper: ObservableObject {
         applyTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
-            refreshKeyboards()
-            applyAllConnected()
+            refreshKeyboards(apply: false)
         }
+    }
+
+    private func devicesFromHID() -> [KeyboardDevice] {
+        guard let hidManager, let raw = IOHIDManagerCopyDevices(hidManager) else { return [] }
+        var devices: [KeyboardDevice] = []
+        var seen = Set<String>()
+        for case let device as IOHIDDevice in (raw as NSSet) {
+            let usagePage = hidNumber(device, kIOHIDPrimaryUsagePageKey) ?? hidNumber(device, kIOHIDDeviceUsagePageKey)
+            let usage = hidNumber(device, kIOHIDPrimaryUsageKey) ?? hidNumber(device, kIOHIDDeviceUsageKey)
+            if let usagePage, let usage, usagePage != UInt64(kHIDPage_GenericDesktop) || usage != UInt64(kHIDUsage_GD_Keyboard) {
+                continue
+            }
+            let vendor = hidNumber(device, kIOHIDVendorIDKey) ?? 0
+            let product = hidNumber(device, kIOHIDProductIDKey) ?? 0
+            let name = hidString(device, kIOHIDProductKey)
+            let transport = hidString(device, kIOHIDTransportKey)
+            let builtIn = transport == "FIFO" || name.localizedCaseInsensitiveContains("Internal Keyboard")
+            let id: String
+            if builtIn && vendor == 0 && product == 0 {
+                id = "builtin"
+            } else if vendor == 0 && product == 0 {
+                id = "name:\(name)"
+            } else {
+                id = "\(vendor)-\(product)"
+            }
+            guard seen.insert(id).inserted else { continue }
+            devices.append(
+                KeyboardDevice(
+                    id: id,
+                    name: name,
+                    vendorID: vendor,
+                    productID: product,
+                    isBuiltIn: builtIn,
+                    isConnected: true
+                )
+            )
+        }
+        return devices
+    }
+
+    private func hidNumber(_ device: IOHIDDevice, _ key: String) -> UInt64? {
+        guard let value = IOHIDDeviceGetProperty(device, key as CFString) else { return nil }
+        return (value as? NSNumber)?.uint64Value
+    }
+
+    private func hidString(_ device: IOHIDDevice, _ key: String) -> String {
+        (IOHIDDeviceGetProperty(device, key as CFString) as? String) ?? ""
     }
 
     private nonisolated static func scanKeyboards() -> [KeyboardDevice] {

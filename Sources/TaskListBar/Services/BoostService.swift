@@ -23,6 +23,9 @@ final class BoostService: ObservableObject {
     @Published private(set) var snapshot = Snapshot()
     @Published private(set) var isRunning = false
     @Published private(set) var pressure = Pressure()
+    @Published private(set) var lastGroups: [ProcessGroup] = []
+    @Published private(set) var lastDisks: [DiskItem] = []
+    @Published private(set) var disksCached = false
 
     /// 一组可清理的进程，供选择面板展示。
     struct ProcessGroup: Identifiable, Equatable {
@@ -136,9 +139,91 @@ final class BoostService: ObservableObject {
 
     private let queue = DispatchQueue(label: "keelbar.boost", qos: .utility)
     private var pressureTimer: DispatchSourceTimer?
+    private var groupsCachedAt = Date.distantPast
+    private var disksCachedAt = Date.distantPast
+
+    private struct ProcessRow {
+        let pid: String
+        let cpu: Double
+        let rssKB: Double
+        let command: String
+        let name: String
+    }
+
+    private struct SizeStamp {
+        let mtime: TimeInterval
+        let count: Int
+        let bytes: Int64
+    }
+
+    private final class RuntimeCache: @unchecked Sendable {
+        static let shared = RuntimeCache()
+        private let lock = NSLock()
+        private var table: (at: Date, rows: [ProcessRow])?
+        private var sizes: [String: SizeStamp] = [:]
+
+        func processTable(ttl: TimeInterval) -> [ProcessRow]? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let table, Date().timeIntervalSince(table.at) < ttl else { return nil }
+            return table.rows
+        }
+
+        func storeProcessTable(_ rows: [ProcessRow]) {
+            lock.lock()
+            table = (Date(), rows)
+            lock.unlock()
+        }
+
+        func size(for path: String, mtime: TimeInterval, count: Int) -> Int64? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let stamp = sizes[path], stamp.mtime == mtime, stamp.count == count else { return nil }
+            return stamp.bytes
+        }
+
+        func storeSize(path: String, mtime: TimeInterval, count: Int, bytes: Int64) {
+            lock.lock()
+            sizes[path] = SizeStamp(mtime: mtime, count: count, bytes: bytes)
+            lock.unlock()
+        }
+
+        func reset() {
+            lock.lock()
+            table = nil
+            sizes.removeAll()
+            lock.unlock()
+        }
+    }
+
+    private static let processTTL: TimeInterval = 12
+    private static let diskTTL: TimeInterval = 90
+    nonisolated private static let tableTTL: TimeInterval = 8
+
+    nonisolated private static let compiledTargets: [(label: String, matchers: [(regex: NSRegularExpression, fullCommandLine: Bool)])] = {
+        targets.map { target in
+            let matchers = target.patterns.compactMap { pattern -> (NSRegularExpression, Bool)? in
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+                return (regex, target.fullCommandLine)
+            }
+            return (target.label, matchers)
+        }
+    }()
 
     func start() {
         samplePressure()
+        queue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            let groups = Self.scanProcesses()
+            let disks = Self.scanDiskSync()
+            Task { @MainActor in
+                guard let self else { return }
+                self.lastGroups = groups
+                self.groupsCachedAt = Date()
+                self.lastDisks = disks
+                self.disksCachedAt = Date()
+                self.disksCached = true
+            }
+        }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 20, repeating: 20, leeway: .seconds(4))
         timer.setEventHandler { [weak self] in
@@ -154,20 +239,36 @@ final class BoostService: ObservableObject {
     }
 
     /// 扫描当前可清理的进程，按目标分组。结果不含空组。
-    func scan() async -> [ProcessGroup] {
-        let targets = Self.targets
+    func scan(force: Bool = false) async -> [ProcessGroup] {
+        if !force, Date().timeIntervalSince(groupsCachedAt) < Self.processTTL, !lastGroups.isEmpty {
+            return lastGroups
+        }
         return await withCheckedContinuation { continuation in
             queue.async {
-                continuation.resume(returning: Self.scanSync(targets: targets))
+                let groups = Self.scanProcesses()
+                Task { @MainActor in
+                    self.lastGroups = groups
+                    self.groupsCachedAt = Date()
+                    continuation.resume(returning: groups)
+                }
             }
         }
     }
 
     /// 扫描可回收的 worktree 与 Node 依赖。
-    func scanDisk() async -> [DiskItem] {
-        await withCheckedContinuation { continuation in
+    func scanDisk(force: Bool = false) async -> [DiskItem] {
+        if !force, Date().timeIntervalSince(disksCachedAt) < Self.diskTTL, disksCached {
+            return lastDisks
+        }
+        return await withCheckedContinuation { continuation in
             queue.async {
-                continuation.resume(returning: Self.scanDiskSync())
+                let disks = Self.scanDiskSync()
+                Task { @MainActor in
+                    self.lastDisks = disks
+                    self.disksCachedAt = Date()
+                    self.disksCached = true
+                    continuation.resume(returning: disks)
+                }
             }
         }
     }
@@ -185,6 +286,7 @@ final class BoostService: ObservableObject {
             let reclaimed = Self.reclaimSync(disks)
             let killed = pids.count
             let message = Self.cleanupMessage(killed: killed, bytes: reclaimed, hadSelection: !pids.isEmpty || !disks.isEmpty)
+            RuntimeCache.shared.reset()
             Task { @MainActor in
                 var snap = self.snapshot
                 snap.generation += 1
@@ -194,6 +296,11 @@ final class BoostService: ObservableObject {
                 snap.message = message
                 self.snapshot = snap
                 self.isRunning = false
+                self.lastGroups = []
+                self.lastDisks = []
+                self.disksCached = false
+                self.groupsCachedAt = .distantPast
+                self.disksCachedAt = .distantPast
                 AppLog.info("加速：\(message)", category: "boost")
                 self.samplePressure()
             }
@@ -228,27 +335,20 @@ final class BoostService: ObservableObject {
         let cores = max(ProcessInfo.processInfo.activeProcessorCount, 1)
         let physical = Double(ProcessInfo.processInfo.physicalMemory)
         let tokens = watchTokens
-        let cpuLimit = highCPUShare
-        let memoryLimit = highMemoryShare
-        let memoryFloor = highMemoryFloorMB
-        let rows = run("/bin/ps", arguments: ["-A", "-o", "pcpu=,rss=,command="]).output
         var cpu = 0.0
         var rssKB = 0.0
 
-        for line in rows.split(separator: "\n", omittingEmptySubsequences: true) {
-            let parts = line.split(maxSplits: 2, omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace })
-            guard parts.count == 3 else { continue }
-            let command = parts[2]
-            guard tokens.contains(where: { command.contains($0) }) else { continue }
-            cpu += Double(parts[0]) ?? 0
-            rssKB += Double(parts[1]) ?? 0
+        for row in processTable() {
+            guard tokens.contains(where: { row.command.contains($0) }) else { continue }
+            cpu += row.cpu
+            rssKB += row.rssKB
         }
 
         let cpuShare = cpu / (Double(cores) * 100)
         let memoryShare = physical > 0 ? (rssKB * 1024) / physical : 0
         let rssMB = Int((rssKB / 1024).rounded())
-        let isHigh = cpuShare >= cpuLimit
-            || (memoryShare >= memoryLimit && rssMB >= memoryFloor)
+        let isHigh = cpuShare >= highCPUShare
+            || (memoryShare >= highMemoryShare && rssMB >= highMemoryFloorMB)
         return Pressure(
             isHigh: isHigh,
             cpuShare: cpuShare,
@@ -258,17 +358,22 @@ final class BoostService: ObservableObject {
         )
     }
 
-    private nonisolated static func scanSync(targets: [Target]) -> [ProcessGroup] {
+    private nonisolated static func scanProcesses() -> [ProcessGroup] {
+        let rows = processTable()
         var used = Set<String>()
         var groups: [ProcessGroup] = []
-        for target in targets {
+        for target in compiledTargets {
             var pids: [String] = []
-            for pattern in target.patterns {
-                for pid in matchingPIDs(pattern: pattern, fullCommandLine: target.fullCommandLine) {
-                    if used.insert(pid).inserted {
-                        pids.append(pid)
-                    }
+            for row in rows {
+                guard !used.contains(row.pid) else { continue }
+                let matched = target.matchers.contains { matcher in
+                    let haystack = matcher.fullCommandLine ? row.command : row.name
+                    let range = NSRange(haystack.startIndex..<haystack.endIndex, in: haystack)
+                    return matcher.regex.firstMatch(in: haystack, options: [], range: range) != nil
                 }
+                guard matched else { continue }
+                used.insert(row.pid)
+                pids.append(row.pid)
             }
             if !pids.isEmpty {
                 groups.append(ProcessGroup(label: target.label, pids: pids.sorted()))
@@ -277,12 +382,30 @@ final class BoostService: ObservableObject {
         return groups
     }
 
-    private nonisolated static func matchingPIDs(pattern: String, fullCommandLine: Bool) -> [String] {
-        var arguments: [String] = []
-        if fullCommandLine { arguments.append("-f") }
-        arguments.append(pattern)
-        let output = run("/usr/bin/pgrep", arguments: arguments).output
-        return output.split(separator: "\n").map(String.init)
+    private nonisolated static func processTable() -> [ProcessRow] {
+        if let cached = RuntimeCache.shared.processTable(ttl: tableTTL) {
+            return cached
+        }
+        let output = run("/bin/ps", arguments: ["-A", "-o", "pid=,pcpu=,rss=,command="]).output
+        var rows: [ProcessRow] = []
+        rows.reserveCapacity(256)
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = line.split(maxSplits: 3, omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace })
+            guard parts.count == 4 else { continue }
+            let command = String(parts[3])
+            let first = command.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? command
+            rows.append(
+                ProcessRow(
+                    pid: String(parts[0]),
+                    cpu: Double(parts[1]) ?? 0,
+                    rssKB: Double(parts[2]) ?? 0,
+                    command: command,
+                    name: URL(fileURLWithPath: first).lastPathComponent
+                )
+            )
+        }
+        RuntimeCache.shared.storeProcessTable(rows)
+        return rows
     }
 
     private nonisolated static func run(_ executable: String, arguments: [String]) -> (status: Int32, output: String) {
@@ -597,9 +720,16 @@ final class BoostService: ObservableObject {
     }
 
     private nonisolated static func directoryBytes(_ url: URL) -> Int64 {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        if let cached = RuntimeCache.shared.size(for: url.path, mtime: mtime, count: 0) {
+            return cached
+        }
         let output = run("/usr/bin/du", arguments: ["-sk", url.path]).output
         let value = output.split(whereSeparator: \.isWhitespace).first.flatMap { Int64($0) } ?? 0
-        return value * 1024
+        let bytes = value * 1024
+        RuntimeCache.shared.storeSize(path: url.path, mtime: mtime, count: 0, bytes: bytes)
+        return bytes
     }
 
     private nonisolated static func isExistingDirectory(_ url: URL) -> Bool {

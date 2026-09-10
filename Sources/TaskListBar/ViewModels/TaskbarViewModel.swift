@@ -541,7 +541,7 @@ final class TaskbarViewModel: ObservableObject {
         closeWindowList()
         startMenuCatalog.searchText = ""
         isModifierKeysOpen = true
-        modifierKeyRemapper.reapply()
+        modifierKeyRemapper.prepareForDisplay()
     }
 
     func closeModifierKeysSettings() {

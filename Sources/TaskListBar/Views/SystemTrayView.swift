@@ -307,7 +307,7 @@ struct BoostFlyout: View {
                     .font(.system(size: 13, weight: .semibold))
                 Spacer(minLength: 8)
                 Button {
-                    reload()
+                    reload(force: true)
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 13, weight: .semibold))
@@ -411,7 +411,7 @@ struct BoostFlyout: View {
         .padding(14)
         .frame(width: 320, alignment: .top)
         .background(PopoverKeyGrabber())
-        .onAppear { reload() }
+        .onAppear { reload(force: false) }
     }
 
     private func flyoutSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -464,13 +464,27 @@ struct BoostFlyout: View {
         )
     }
 
-    private func reload() {
-        didScan = false
-        didScanDisk = false
-        disks = []
+    private func reload(force: Bool = false) {
+        let hasProcessCache = !boost.lastGroups.isEmpty
+        let hasDiskCache = boost.disksCached
+        if force || !hasProcessCache {
+            didScan = false
+        }
+        if force || !hasDiskCache {
+            didScanDisk = false
+            if force { disks = [] }
+        } else {
+            disks = boost.lastDisks
+            didScanDisk = true
+        }
+        if hasProcessCache && !force {
+            groups = boost.lastGroups
+            selected = Set(groups.map(\.label) + disks.filter(\.selectedByDefault).map(\.id))
+            didScan = true
+        }
         Task { @MainActor in
-            async let processScan = boost.scan()
-            async let diskScan = boost.scanDisk()
+            async let processScan = boost.scan(force: force)
+            async let diskScan = boost.scanDisk(force: force)
             let processResult = await processScan
             groups = processResult
             selected = Set(processResult.map(\.label))
