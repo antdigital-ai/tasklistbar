@@ -15,7 +15,10 @@ let package = Package(
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("Collaboration"),
-                .linkedFramework("IOKit")
+                .linkedFramework("IOKit"),
+                .linkedFramework("CoreBluetooth"),
+                .linkedFramework("CoreLocation"),
+                .linkedFramework("EventKit")
             ]
         )
     ]

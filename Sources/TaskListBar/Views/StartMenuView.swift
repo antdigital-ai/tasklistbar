@@ -296,6 +296,9 @@ struct StartMenuView: View {
             FooterIconButton(systemImage: "gearshape", help: "设置") {
                 viewModel.openSettings()
             }
+            FooterIconButton(systemImage: "lock.shield", help: "权限") {
+                viewModel.openPermissions()
+            }
             FooterIconButton(systemImage: "keyboard", help: "修饰键") {
                 viewModel.openModifierKeysSettings()
             }

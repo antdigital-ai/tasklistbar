@@ -40,6 +40,8 @@
 	<string>KeelBar 需要读取日历，以便在任务栏预览中显示日程和节假日。</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>KeelBar 需要读取日历，以便在任务栏预览中显示日程和节假日。</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>KeelBar 需要屏幕录制权限以读取其他窗口的标题，不会录制屏幕内容。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>KeelBar 需要位置以在日历中显示本周天气。</string>
 	<key>NSLocationUsageDescription</key>

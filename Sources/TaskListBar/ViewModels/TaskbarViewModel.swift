@@ -11,6 +11,7 @@ final class TaskbarViewModel: ObservableObject {
     @Published var isCalendarExpanded: Bool
     @Published var isCalendarAgendaExpanded = false
     @Published var isSettingsOpen = false
+    @Published var isPermissionsOpen = false
     @Published var isWindowListOpen = false
     @Published var windowListBundleID: String?
     @Published var windowListAppName = ""
@@ -42,6 +43,7 @@ final class TaskbarViewModel: ObservableObject {
     let clockModel = ClockModel()
     let calendarStore = CalendarStore()
     let weatherStore = WeatherStore()
+    let permissionCenter = PermissionCenter()
 
     private var cancellables = Set<AnyCancellable>()
     private var rebuildTask: Task<Void, Never>?
@@ -139,6 +141,7 @@ final class TaskbarViewModel: ObservableObject {
         weatherStore.start()
         favoritesStore.start()
         boostService.start()
+        permissionCenter.start()
     }
 
     func stopTrayMonitors() {
@@ -150,6 +153,7 @@ final class TaskbarViewModel: ObservableObject {
         calendarStore.stop()
         favoritesStore.stop()
         boostService.stop()
+        permissionCenter.stop()
     }
 
     private func scheduleRebuild() {
@@ -460,6 +464,7 @@ final class TaskbarViewModel: ObservableObject {
         isModifierKeysOpen = false
         isCalendarOpen = false
         isSettingsOpen = false
+        isPermissionsOpen = false
         closeWindowList()
         showsAllApps = false
         startMenuCatalog.selectedCategory = nil
@@ -496,6 +501,7 @@ final class TaskbarViewModel: ObservableObject {
         showsAllApps = false
         isModifierKeysOpen = false
         isSettingsOpen = false
+        isPermissionsOpen = false
         closeWindowList()
         startMenuCatalog.selectedCategory = nil
         startMenuCatalog.searchText = ""
@@ -538,6 +544,7 @@ final class TaskbarViewModel: ObservableObject {
         showsAllApps = false
         isCalendarOpen = false
         isSettingsOpen = false
+        isPermissionsOpen = false
         closeWindowList()
         startMenuCatalog.searchText = ""
         isModifierKeysOpen = true
@@ -553,6 +560,7 @@ final class TaskbarViewModel: ObservableObject {
         showsAllApps = false
         isCalendarOpen = false
         isModifierKeysOpen = false
+        isPermissionsOpen = false
         closeWindowList()
         startMenuCatalog.searchText = ""
         isSettingsOpen = true
@@ -563,12 +571,37 @@ final class TaskbarViewModel: ObservableObject {
         isSettingsOpen = false
     }
 
+    func openPermissions() {
+        isStartMenuOpen = false
+        showsAllApps = false
+        isCalendarOpen = false
+        isModifierKeysOpen = false
+        isSettingsOpen = false
+        closeWindowList()
+        startMenuCatalog.searchText = ""
+        permissionCenter.refresh()
+        isPermissionsOpen = true
+    }
+
+    func closePermissions() {
+        isPermissionsOpen = false
+        permissionCenter.setPageVisible(false)
+    }
+
+    func presentPermissionsIfNeeded() {
+        permissionCenter.refresh()
+        guard !permissionCenter.hasRequired else { return }
+        openPermissions()
+    }
+
     func closeOverlays(includingWindowList: Bool = true) {
         isStartMenuOpen = false
         isModifierKeysOpen = false
         isCalendarOpen = false
         isSettingsOpen = false
+        isPermissionsOpen = false
         isCalendarAgendaExpanded = false
+        permissionCenter.setPageVisible(false)
         if includingWindowList {
             closeWindowList()
         }
@@ -579,7 +612,7 @@ final class TaskbarViewModel: ObservableObject {
     }
 
     var hasOpenOverlay: Bool {
-        isStartMenuOpen || isModifierKeysOpen || isCalendarOpen || isSettingsOpen || isCalendarAgendaExpanded || isWindowListOpen
+        isStartMenuOpen || isModifierKeysOpen || isCalendarOpen || isSettingsOpen || isPermissionsOpen || isCalendarAgendaExpanded || isWindowListOpen
     }
 
     func requestCalendarShift(_ delta: Int) {

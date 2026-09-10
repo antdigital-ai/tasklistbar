@@ -43,9 +43,29 @@ echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
 
 echo "✓ Done: $APP_BUNDLE"
-echo "  Run: open \"$APP_BUNDLE\""
+
+install_to_applications() {
+  local dest_dir="/Applications"
+  if [[ ! -w "$dest_dir" ]]; then
+    dest_dir="${HOME}/Applications"
+    mkdir -p "$dest_dir"
+  fi
+  local dest="${dest_dir}/${APP_NAME}.app"
+  echo "→ Installing ${dest}"
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    pkill -x "$APP_NAME" || true
+    sleep 0.4
+  fi
+  rm -rf "$dest"
+  ditto "$APP_BUNDLE" "$dest"
+  codesign --force --deep --sign - "$dest" >/dev/null 2>&1 || true
+  echo "✓ Installed: $dest"
+  echo "  Run: open \"$dest\""
+}
 
 if [[ "$CONFIG" == "release" ]]; then
+  install_to_applications
+
   STAGE="$ROOT/dist/.dmg-stage"
   DMG="$ROOT/dist/${APP_NAME}.dmg"
   echo "→ Packaging ${DMG}"
@@ -57,4 +77,6 @@ if [[ "$CONFIG" == "release" ]]; then
   hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
   rm -rf "$STAGE"
   echo "✓ DMG: $DMG"
+else
+  echo "  Run: open \"$APP_BUNDLE\""
 fi

@@ -13,6 +13,7 @@ final class TaskbarController: NSObject {
     private var modifierKeysPanel: NSPanel?
     private var calendarPanel: NSPanel?
     private var settingsPanel: NSPanel?
+    private var permissionsPanel: NSPanel?
     private var windowListPanel: NSPanel?
     private var statusItem: NSStatusItem?
     private var screenObserver: NSObjectProtocol?
@@ -59,6 +60,7 @@ final class TaskbarController: NSObject {
         observeFullscreenSpace()
         viewModel.startTrayMonitors()
         prewarmStartMenu()
+        presentPermissionsIfNeeded()
 
         viewModel.$isStartMenuOpen
             .receive(on: RunLoop.main)
@@ -99,6 +101,13 @@ final class TaskbarController: NSObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.syncSettingsVisibility()
+            }
+            .store(in: &cancellables)
+
+        viewModel.$isPermissionsOpen
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncPermissionsVisibility()
             }
             .store(in: &cancellables)
 
@@ -145,6 +154,7 @@ final class TaskbarController: NSObject {
         menu.delegate = self
         menu.addItem(statusItem("打开开始菜单", symbol: "square.grid.2x2", action: #selector(statusOpenStartMenu)))
         menu.addItem(statusItem("设置", symbol: "gearshape", action: #selector(statusOpenSettings), key: ","))
+        menu.addItem(statusItem("权限", symbol: "lock.shield", action: #selector(statusOpenPermissions)))
         menu.addItem(statusItem("修饰键设置", symbol: "keyboard", action: #selector(statusOpenModifierKeys)))
         menu.addItem(.separator())
         let launchItem = statusItem("开机时启动", symbol: "power", action: #selector(statusToggleLaunchAtLogin))
@@ -229,6 +239,10 @@ final class TaskbarController: NSObject {
 
     @objc private func statusOpenSettings() {
         viewModel.openSettings()
+    }
+
+    @objc private func statusOpenPermissions() {
+        viewModel.openPermissions()
     }
 
     @objc private func statusToggleLaunchAtLogin() {
@@ -424,6 +438,10 @@ final class TaskbarController: NSObject {
             ThemedRoot(settings: viewModel.appSettings) {
                 AppSettingsView(
                     settings: viewModel.appSettings,
+                    permissionCenter: viewModel.permissionCenter,
+                    onOpenPermissions: { [weak self] in
+                        self?.viewModel.openPermissions()
+                    },
                     onOpenModifierKeys: { [weak self] in
                         self?.viewModel.openModifierKeysSettings()
                     },
@@ -452,6 +470,37 @@ final class TaskbarController: NSObject {
         panel.contentView = glass
 
         settingsPanel = panel
+    }
+
+    private func createPermissionsPanelIfNeeded() {
+        if permissionsPanel != nil { return }
+
+        let glass = GlassPanelFactory.wrap(
+            ThemedRoot(settings: viewModel.appSettings) {
+                PermissionsView(center: viewModel.permissionCenter) { [weak self] in
+                    self?.viewModel.closePermissions()
+                }
+            },
+            cornerRadius: 20
+        )
+
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: PermissionsView.Metrics.width, height: PermissionsView.Metrics.height),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.contentView = glass
+
+        permissionsPanel = panel
     }
 
     private func createWindowListPanelIfNeeded() {
@@ -581,6 +630,9 @@ final class TaskbarController: NSObject {
         if let settings = settingsPanel {
             apply(settings, settingsTargetFrame())
         }
+        if let permissions = permissionsPanel {
+            apply(permissions, permissionsTargetFrame())
+        }
         if let list = windowListPanel {
             apply(list, windowListTargetFrame())
         }
@@ -603,6 +655,7 @@ final class TaskbarController: NSObject {
     private func syncModifierKeysVisibility() {
         if viewModel.isModifierKeysOpen {
             hideOverlayImmediately(settingsPanel)
+            hideOverlayImmediately(permissionsPanel)
             hideOverlayImmediately(startMenuPanel)
             createModifierKeysPanelIfNeeded()
             ignoreOutsideClick()
@@ -663,6 +716,7 @@ final class TaskbarController: NSObject {
 
     private func syncSettingsVisibility() {
         if viewModel.isSettingsOpen {
+            hideOverlayImmediately(permissionsPanel)
             createSettingsPanelIfNeeded()
             animatePanel(
                 settingsPanel,
@@ -675,6 +729,28 @@ final class TaskbarController: NSObject {
                 settingsPanel,
                 show: false,
                 target: settingsTargetFrame()
+            )
+        }
+    }
+
+    private func syncPermissionsVisibility() {
+        if viewModel.isPermissionsOpen {
+            hideOverlayImmediately(settingsPanel)
+            hideOverlayImmediately(startMenuPanel)
+            hideOverlayImmediately(modifierKeysPanel)
+            createPermissionsPanelIfNeeded()
+            ignoreOutsideClick()
+            animatePanel(
+                permissionsPanel,
+                show: true,
+                target: permissionsTargetFrame()
+            )
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            animatePanel(
+                permissionsPanel,
+                show: false,
+                target: permissionsTargetFrame()
             )
         }
     }
@@ -982,6 +1058,25 @@ final class TaskbarController: NSObject {
         )
     }
 
+    private func permissionsTargetFrame() -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let frame = screen.frame
+        return NSRect(
+            x: frame.minX + 8,
+            y: frame.minY + Self.barHeight + 8,
+            width: PermissionsView.Metrics.width,
+            height: PermissionsView.Metrics.height
+        )
+    }
+
+    private func presentPermissionsIfNeeded() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard let self else { return }
+            self.viewModel.presentPermissionsIfNeeded()
+        }
+    }
+
     private func observeFullscreenSpace() {
         viewModel.spacesMonitor.onFullscreenDetected = { [weak self] in
             self?.hideTaskbarForFullscreen()
@@ -1105,7 +1200,7 @@ final class TaskbarController: NSObject {
                 if enabled {
                     self.windowAvoider.start()
                     if !self.windowAvoider.isTrusted {
-                        self.windowAvoider.requestAccess()
+                        self.viewModel.openPermissions()
                     }
                 } else {
                     self.windowAvoider.stop()
@@ -1219,7 +1314,7 @@ final class TaskbarController: NSObject {
             }
         }
 
-        guard viewModel.isCalendarOpen, !viewModel.isSettingsOpen, modifiers.isEmpty else {
+        guard viewModel.isCalendarOpen, !viewModel.isSettingsOpen, !viewModel.isPermissionsOpen, modifiers.isEmpty else {
             return event
         }
 
@@ -1285,6 +1380,13 @@ final class TaskbarController: NSObject {
             let inSettings = settingsPanel?.frame.contains(location) == true
             if !inSettings && !inBar {
                 viewModel.closeSettings()
+            }
+        }
+
+        if viewModel.isPermissionsOpen {
+            let inPermissions = permissionsPanel?.frame.contains(location) == true
+            if !inPermissions && !inBar {
+                viewModel.closePermissions()
             }
         }
 

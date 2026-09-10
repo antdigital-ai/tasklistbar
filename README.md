@@ -21,8 +21,8 @@ macOS 底部任务栏（纯 Swift：AppKit + SwiftUI），交互参考本地 [uB
 
 ```bash
 ./Scripts/build.sh          # debug → dist/KeelBar.app
-./Scripts/build.sh release  # release
-open dist/KeelBar.app
+./Scripts/build.sh release  # release，并安装到 /Applications/KeelBar.app
+open -a KeelBar
 ```
 
 建议：

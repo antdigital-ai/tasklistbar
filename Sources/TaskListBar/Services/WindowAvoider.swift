@@ -167,10 +167,7 @@ final class WindowAvoider {
 
     private func adjust(frontmostOnly: Bool) {
         guard enabled else { return }
-        guard AXIsProcessTrusted() else {
-            promptOnceIfNeeded()
-            return
-        }
+        guard AXIsProcessTrusted() else { return }
         attachFrontmostObserver()
 
         let apps: [NSRunningApplication]
@@ -184,13 +181,6 @@ final class WindowAvoider {
             guard app.processIdentifier != ownPID else { continue }
             insetWindows(of: app, retry: true)
         }
-    }
-
-    private func promptOnceIfNeeded() {
-        guard !didPrompt else { return }
-        markPrompted()
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
     }
 
     private func markPrompted() {

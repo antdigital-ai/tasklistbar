@@ -3,6 +3,8 @@ import SwiftUI
 
 struct AppSettingsView: View {
     @ObservedObject var settings: AppSettings
+    @ObservedObject var permissionCenter: PermissionCenter
+    let onOpenPermissions: () -> Void
     let onOpenModifierKeys: () -> Void
     let onClose: () -> Void
 
@@ -34,7 +36,10 @@ struct AppSettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { searchFocused = true }
+        .onAppear {
+            searchFocused = true
+            permissionCenter.refresh()
+        }
         .onDisappear {
             settings.isRecordingHotkey = false
         }
@@ -100,8 +105,22 @@ struct AppSettingsView: View {
         let appearance = appearanceFlags
         let behavior = behaviorFlags
         let shortcuts = shortcutFlags
+        let permissions = q.row("权限", "辅助功能", "屏幕录制", "日历", "位置", "蓝牙", "磁盘", "accessibility", "permission", in: "权限")
         return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if permissions {
+                    settingsSection("权限") {
+                        SettingsLinkRow(
+                            title: "系统权限",
+                            detail: permissionCenter.hasRequired
+                                ? (permissionCenter.missingCount == 0 ? "已全部开启" : "还可开启 \(permissionCenter.missingCount) 项")
+                                : "还差\(permissionCenter.missingRequiredTitle)"
+                        ) {
+                            onOpenPermissions()
+                        }
+                    }
+                }
+
                 if appearance.hasVisible {
                     settingsSection("外观") {
                         row(appearance.theme, divider: false) {
@@ -233,7 +252,7 @@ struct AppSettingsView: View {
                     }
                 }
 
-                if !appearance.hasVisible && !behavior.hasVisible && !shortcuts.hasVisible {
+                if !permissions && !appearance.hasVisible && !behavior.hasVisible && !shortcuts.hasVisible {
                     Text("没有匹配的设置")
                         .font(.system(size: 12))
                         .foregroundStyle(.primary.opacity(0.4))
