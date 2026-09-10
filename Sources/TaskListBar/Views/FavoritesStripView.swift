@@ -117,7 +117,6 @@ private struct FavoriteButton<Menu: View>: View {
                 .resizable()
                 .interpolation(.high)
                 .frame(width: size.iconSize, height: size.iconSize)
-                .scaleEffect(hovering ? 1.12 : 1.0)
                 .frame(width: size.appButtonWidth, height: size.appButtonHeight)
                 .background(
                     RoundedRectangle(cornerRadius: size.corner, style: .continuous)

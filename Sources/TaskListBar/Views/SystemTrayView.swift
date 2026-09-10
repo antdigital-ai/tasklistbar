@@ -10,6 +10,7 @@ struct SystemTrayView: View {
     @ObservedObject var clock: ClockModel
     var isCalendarOpen: Bool = false
     var onToggleCalendar: (() -> Void)?
+    var onShowDesktop: (() -> Void)?
     @Environment(\.taskbarSize) private var size
 
     var body: some View {
@@ -33,6 +34,8 @@ struct SystemTrayView: View {
                 isOpen: isCalendarOpen,
                 onToggle: { onToggleCalendar?() }
             )
+
+            ShowDesktopTrayButton(action: { onShowDesktop?() })
         }
         .frame(height: size.trayHit)
         .padding(.trailing, 2)
@@ -98,14 +101,103 @@ struct BatteryTrayButton: View {
     }
 }
 
+/// Boost mark — a lightning bolt (Sowilo) drawn in the same stroke style as
+/// the Bluetooth rune so the two tray icons read as one family.
+private enum BoostTrayIcon {
+    private static var cached: NSImage?
+
+    static func image() -> NSImage {
+        if let cached { return cached }
+        let image = draw()
+        cached = image
+        return image
+    }
+
+    private static func draw() -> NSImage {
+        let side: CGFloat = 16
+        let scale: CGFloat = 4
+        let pixels = Int(side * scale)
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )!
+        rep.size = NSSize(width: side, height: side)
+
+        NSGraphicsContext.saveGraphicsState()
+        if let context = NSGraphicsContext(bitmapImageRep: rep) {
+            NSGraphicsContext.current = context
+            context.imageInterpolation = .high
+            context.shouldAntialias = true
+            drawBolt(in: NSRect(x: 0, y: 0, width: side, height: side))
+        }
+        NSGraphicsContext.restoreGraphicsState()
+
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.addRepresentation(rep)
+        image.isTemplate = true
+        return image
+    }
+
+    private static func drawBolt(in rect: NSRect) {
+        let cx = rect.midX
+        let cy = rect.midY
+        let s = min(rect.width, rect.height) * 0.88
+
+        func pt(_ dx: CGFloat, _ dy: CGFloat) -> NSPoint {
+            NSPoint(x: cx + dx * s, y: cy + dy * s)
+        }
+
+        let bolt = NSBezierPath()
+        bolt.lineCapStyle = .round
+        bolt.lineJoinStyle = .round
+        bolt.lineWidth = rect.width * 0.11
+
+        // Symmetric lightning outline, clockwise from the top tip.
+        bolt.move(to: pt(0, 0.48))
+        bolt.line(to: pt(0.30, 0.08))
+        bolt.line(to: pt(0.10, 0.08))
+        bolt.line(to: pt(0.10, -0.08))
+        bolt.line(to: pt(0.30, -0.08))
+        bolt.line(to: pt(0, -0.48))
+        bolt.line(to: pt(-0.30, -0.08))
+        bolt.line(to: pt(-0.10, -0.08))
+        bolt.line(to: pt(-0.10, 0.08))
+        bolt.line(to: pt(-0.30, 0.08))
+        bolt.close()
+
+        NSColor.black.setStroke()
+        bolt.stroke()
+    }
+}
+
 struct BoostTrayButton: View {
     @ObservedObject var boost: BoostService
+    @Environment(\.taskbarAccent) private var accent
     @Environment(\.taskbarSize) private var size
     @State private var hovering = false
     @State private var showingFlyout = false
+    @State private var justCleaned = false
+    @State private var cleanFlashTask: Task<Void, Never>?
 
     private var helpText: String {
-        "加速：选择要关闭的编译 / AI 进程"
+        if boost.pressure.isHigh {
+            return "AI 占用偏高 · CPU \(boost.pressure.cpuPercent)% · 内存 \(boost.pressure.rssMB)MB（点击清理）"
+        }
+        return "加速：关闭编译 / AI 进程，并清理 Worktree 与 Node 依赖"
+    }
+
+    private var iconColor: Color {
+        if justCleaned { return accent.color }
+        if boost.pressure.isHigh { return Color(red: 0.96, green: 0.78, blue: 0.18) }
+        return Color.primary.opacity(hovering ? 0.98 : 0.88)
     }
 
     var body: some View {
@@ -113,8 +205,13 @@ struct BoostTrayButton: View {
             NSApp.activate(ignoringOtherApps: true)
             showingFlyout.toggle()
         } label: {
-            Text("🚀")
-                .font(.system(size: size.traySymbol + 2))
+            Image(nsImage: BoostTrayIcon.image())
+                .renderingMode(.template)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size.traySymbol + 3, height: size.traySymbol + 3)
+                .foregroundStyle(iconColor)
                 .frame(width: size.trayHit, height: size.trayHit)
                 .background(
                     RoundedRectangle(cornerRadius: size.corner, style: .continuous)
@@ -134,6 +231,20 @@ struct BoostTrayButton: View {
                 showingFlyout = false
             }
         }
+        .onChange(of: boost.snapshot.generation) { _ in
+            guard boost.snapshot.generation > 0 else { return }
+            flashCleaned()
+        }
+    }
+
+    private func flashCleaned() {
+        cleanFlashTask?.cancel()
+        justCleaned = true
+        cleanFlashTask = Task {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            justCleaned = false
+        }
     }
 }
 
@@ -142,11 +253,51 @@ struct BoostFlyout: View {
     let onClose: () -> Void
     @Environment(\.taskbarAccent) private var accent
     @State private var groups: [BoostService.ProcessGroup] = []
+    @State private var disks: [BoostService.DiskItem] = []
     @State private var selected: Set<String> = []
     @State private var didScan = false
+    @State private var didScanDisk = false
 
     private var selectedCount: Int {
         groups.filter { selected.contains($0.label) }.reduce(0) { $0 + $1.count }
+    }
+
+    private var selectedBytes: Int64 {
+        let chosen = disks.filter { selected.contains($0.id) }
+        let worktreePaths = chosen
+            .filter { $0.kind != .nodeDependencies }
+            .flatMap { $0.entries.map(\.url.path) }
+        var total: Int64 = 0
+        for item in chosen {
+            if item.kind == .nodeDependencies {
+                for entry in item.entries where !worktreePaths.contains(where: { entry.url.path.hasPrefix($0 + "/") }) {
+                    total += entry.bytes
+                }
+            } else {
+                total += item.bytes
+            }
+        }
+        return total
+    }
+
+    private var canClean: Bool {
+        !boost.isRunning && (
+            selectedCount > 0 || disks.contains { selected.contains($0.id) }
+        )
+    }
+
+    private var listHeight: CGFloat {
+        let processBlock: CGFloat = groups.isEmpty ? 0 : 22 + CGFloat(groups.count) * 30
+        let diskBlock: CGFloat
+        if !disks.isEmpty {
+            diskBlock = 22 + CGFloat(disks.count) * 38
+        } else if !didScanDisk {
+            diskBlock = 28
+        } else {
+            diskBlock = 0
+        }
+        let spacing: CGFloat = (processBlock > 0 && diskBlock > 0) ? 14 : 0
+        return min(560, max(420, processBlock + diskBlock + spacing))
     }
 
     var body: some View {
@@ -177,61 +328,127 @@ struct BoostFlyout: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
-            } else if groups.isEmpty {
-                Text("没有发现可清理的进程")
+            } else if groups.isEmpty && disks.isEmpty && didScanDisk {
+                Text("没有发现可清理的进程或文件")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
             } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(groups) { group in
-                        Toggle(isOn: binding(for: group.label)) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !groups.isEmpty {
+                            flyoutSection("进程") {
+                                ForEach(groups) { group in
+                                    cleanupRow(
+                                        title: group.label,
+                                        accessory: "\(group.count)",
+                                        isOn: binding(for: group.label)
+                                    )
+                                }
+                            }
+                        }
+                        if !disks.isEmpty {
+                            flyoutSection("磁盘") {
+                                ForEach(disks) { item in
+                                    cleanupRow(
+                                        title: item.label,
+                                        subtitle: item.detail,
+                                        accessory: BoostService.formatBytes(item.bytes),
+                                        isOn: binding(for: item.id)
+                                    )
+                                }
+                            }
+                        } else if !didScanDisk {
                             HStack(spacing: 8) {
-                                Text(group.label)
-                                    .font(.system(size: 12))
-                                Spacer(minLength: 8)
-                                Text("\(group.count)")
-                                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                                    .monospacedDigit()
+                                ProgressView().controlSize(.small)
+                                Text("正在计算磁盘占用…")
+                                    .font(.system(size: 11))
                                     .foregroundStyle(.secondary)
                             }
-                            .contentShape(Rectangle())
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 4)
                         }
-                        .toggleStyle(.checkbox)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
                     }
                 }
+                .frame(height: listHeight, alignment: .top)
             }
 
-            HStack {
-                Text("共 \(selectedCount) 个进程")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if selectedCount > 0 {
+                        Text("\(selectedCount) 个进程")
+                    }
+                    if selectedBytes > 0 {
+                        Text("可回收 \(BoostService.formatBytes(selectedBytes))")
+                    }
+                    if selectedCount == 0 && selectedBytes == 0 {
+                        Text("未选择")
+                    }
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Button {
-                    let chosen = groups.filter { selected.contains($0.label) }
-                    boost.boost(groups: chosen)
+                    let chosenGroups = groups.filter { selected.contains($0.label) }
+                    let chosenDisks = disks.filter { selected.contains($0.id) }
+                    boost.boost(groups: chosenGroups, disks: chosenDisks)
                     onClose()
                 } label: {
-                    Text("关闭选中")
+                    Text("清理选中")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 5)
                         .background(
-                            Capsule().fill(accent.color.opacity(selectedCount > 0 && !boost.isRunning ? 1 : 0.4))
+                            Capsule().fill(accent.color.opacity(canClean ? 1 : 0.4))
                         )
                 }
                 .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.94))
-                .disabled(selectedCount == 0 || boost.isRunning)
+                .disabled(!canClean)
             }
         }
-        .padding(12)
-        .frame(width: 260)
+        .padding(14)
+        .frame(width: 320, alignment: .top)
         .background(PopoverKeyGrabber())
         .onAppear { reload() }
+    }
+
+    private func flyoutSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.42))
+                .padding(.horizontal, 4)
+            VStack(alignment: .leading, spacing: 2) {
+                content()
+            }
+        }
+    }
+
+    private func cleanupRow(title: String, subtitle: String? = nil, accessory: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12))
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Text(accessory)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .toggleStyle(.checkbox)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
     }
 
     private func binding(for label: String) -> Binding<Bool> {
@@ -249,11 +466,19 @@ struct BoostFlyout: View {
 
     private func reload() {
         didScan = false
+        didScanDisk = false
+        disks = []
         Task { @MainActor in
-            let result = await boost.scan()
-            groups = result
-            selected = Set(result.map(\.label))
+            async let processScan = boost.scan()
+            async let diskScan = boost.scanDisk()
+            let processResult = await processScan
+            groups = processResult
+            selected = Set(processResult.map(\.label))
             didScan = true
+            let diskResult = await diskScan
+            disks = diskResult
+            selected.formUnion(diskResult.filter(\.selectedByDefault).map(\.id))
+            didScanDisk = true
         }
     }
 }
@@ -665,6 +890,33 @@ struct ClockTrayView: View {
             }
         }
         .help(helpText)
+    }
+}
+
+struct ShowDesktopTrayButton: View {
+    let action: () -> Void
+    @Environment(\.taskbarSize) private var size
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Capsule()
+                .fill(hovering ? Color.primary.opacity(0.42) : Color.primary.opacity(0.26))
+                .frame(width: 4, height: size.trayHit * 0.66)
+                .frame(width: size.trayHit * 0.72, height: size.trayHit)
+                .contentShape(Rectangle())
+                .background(
+                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
+                        .fill(hovering ? TaskbarTheme.hover : Color.clear)
+                )
+        }
+        .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
+        .onHover { hovering in
+            withAnimation(TaskbarMotion.hover) {
+                self.hovering = hovering
+            }
+        }
+        .help("显示桌面")
     }
 }
 

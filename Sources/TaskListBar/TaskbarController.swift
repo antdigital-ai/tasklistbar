@@ -23,6 +23,7 @@ final class TaskbarController: NSObject {
     private let windowAvoider = WindowAvoider()
     private var cancellables = Set<AnyCancellable>()
     private var spaceAttachTask: Task<Void, Never>?
+    private var suppressOutsideClose = false
 
     init(
         appMonitor: AppMonitor,
@@ -362,7 +363,7 @@ final class TaskbarController: NSObject {
         )
 
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: ModifierKeysSettingsView.Metrics.width, height: ModifierKeysSettingsView.Metrics.height),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -375,6 +376,7 @@ final class TaskbarController: NSObject {
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
+        glass.autoresizingMask = [.width, .height]
         panel.contentView = glass
 
         modifierKeysPanel = panel
@@ -434,7 +436,7 @@ final class TaskbarController: NSObject {
         )
 
         let panel = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 468),
+            contentRect: NSRect(x: 0, y: 0, width: AppSettingsView.Metrics.width, height: AppSettingsView.Metrics.height),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -571,12 +573,7 @@ final class TaskbarController: NSObject {
             ))
         }
         if let modifiers = modifierKeysPanel {
-            apply(modifiers, NSRect(
-                x: frame.minX + 8,
-                y: frame.minY + bar + 8,
-                width: 420,
-                height: 420
-            ))
+            apply(modifiers, modifierKeysTargetFrame())
         }
         if let calendar = calendarPanel {
             apply(calendar, calendarTargetFrame())
@@ -605,7 +602,10 @@ final class TaskbarController: NSObject {
 
     private func syncModifierKeysVisibility() {
         if viewModel.isModifierKeysOpen {
+            hideOverlayImmediately(settingsPanel)
+            hideOverlayImmediately(startMenuPanel)
             createModifierKeysPanelIfNeeded()
+            ignoreOutsideClick()
             animatePanel(
                 modifierKeysPanel,
                 show: true,
@@ -912,9 +912,22 @@ final class TaskbarController: NSObject {
         return NSRect(
             x: frame.minX + 8,
             y: frame.minY + Self.barHeight + 8,
-            width: 420,
-            height: 420
+            width: ModifierKeysSettingsView.Metrics.width,
+            height: ModifierKeysSettingsView.Metrics.height
         )
+    }
+
+    private func hideOverlayImmediately(_ panel: NSPanel?) {
+        guard let panel, panel.isVisible else { return }
+        panel.alphaValue = 1
+        panel.orderOut(nil)
+    }
+
+    private func ignoreOutsideClick() {
+        suppressOutsideClose = true
+        DispatchQueue.main.async { [weak self] in
+            self?.suppressOutsideClose = false
+        }
     }
 
     private func calendarTargetFrame() -> NSRect {
@@ -964,8 +977,8 @@ final class TaskbarController: NSObject {
         return NSRect(
             x: frame.minX + 8,
             y: frame.minY + Self.barHeight + 8,
-            width: 340,
-            height: 468
+            width: AppSettingsView.Metrics.width,
+            height: AppSettingsView.Metrics.height
         )
     }
 
@@ -1243,7 +1256,7 @@ final class TaskbarController: NSObject {
     }
 
     private func handleMouseDown() {
-        guard viewModel.hasOpenOverlay else { return }
+        guard viewModel.hasOpenOverlay, !suppressOutsideClose else { return }
         let location = NSEvent.mouseLocation
         let inBar = panel?.frame.contains(location) == true
 

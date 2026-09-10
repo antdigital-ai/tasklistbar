@@ -15,6 +15,7 @@ final class SpacesMonitor: ObservableObject {
 
     private var observers: [NSObjectProtocol] = []
     private var debounceTask: Task<Void, Never>?
+    private static var axFullscreenCache: (value: Bool, at: Date)?
 
     func start() {
         refresh()
@@ -76,12 +77,12 @@ final class SpacesMonitor: ObservableObject {
         debounceTask?.cancel()
         refresh(updateFullscreen: false)
         debounceTask = Task { [weak self] in
-            for _ in 0..<8 {
-                try? await Task.sleep(nanoseconds: 20_000_000)
+            for _ in 0..<3 {
+                try? await Task.sleep(nanoseconds: 80_000_000)
                 guard !Task.isCancelled else { return }
                 await MainActor.run { self?.probeAndApplyFullscreen(reason: "poll") }
             }
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            try? await Task.sleep(nanoseconds: 160_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run { self?.refresh() }
         }
@@ -96,8 +97,10 @@ final class SpacesMonitor: ObservableObject {
 
     func looksFullscreenNow() -> Bool {
         if NSApp.currentSystemPresentationOptions.contains(.fullScreen) { return true }
-        if Self.isAXFullscreen() { return true }
-        return SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main))?.isFullscreen == true
+        if SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main))?.isFullscreen == true {
+            return true
+        }
+        return Self.isAXFullscreen()
     }
 
     func refresh(updateFullscreen: Bool = true) {
@@ -130,17 +133,21 @@ final class SpacesMonitor: ObservableObject {
     }
 
     private static func isAXFullscreen() -> Bool {
+        if let cached = axFullscreenCache, Date().timeIntervalSince(cached.at) < 0.35 {
+            return cached.value
+        }
+        let value = readAXFullscreen()
+        axFullscreenCache = (value, Date())
+        return value
+    }
+
+    private static func readAXFullscreen() -> Bool {
         guard AXIsProcessTrusted() else { return false }
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.bundleIdentifier != Bundle.main.bundleIdentifier
         else { return false }
         let element = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(element, 0.1)
-        if let windows = AXHelper.children(element, attribute: kAXWindowsAttribute as CFString) {
-            for window in windows {
-                if AXHelper.bool(window, "AXFullScreen" as CFString) == true { return true }
-            }
-        }
+        AXUIElementSetMessagingTimeout(element, 0.04)
         for attribute in [kAXFocusedWindowAttribute as CFString, kAXMainWindowAttribute as CFString] {
             var ref: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, attribute, &ref) == .success, let ref else { continue }
@@ -169,6 +176,17 @@ final class SpacesMonitor: ObservableObject {
         task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         task.arguments = ["-a", "Mission Control"]
         try? task.run()
+    }
+
+    /// Toggle "Show Desktop" by tapping F11 (macOS default), the cleanest
+    /// system-level way to minimize all windows onto the desktop edge.
+    func toggleShowDesktop() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(0x67), keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(0x67), keyDown: false)
+        keyDown?.post(tap: .cghidEventTap)
+        keyUp?.post(tap: .cghidEventTap)
+        AppLog.info("显示桌面", category: "spaces")
     }
 }
 

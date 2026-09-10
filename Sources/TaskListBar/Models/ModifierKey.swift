@@ -112,3 +112,25 @@ struct ModifierKeyConfiguration: Codable, Equatable {
     var isIdentity: Bool { self == .default }
     var isWindowsKeyboard: Bool { self == .windowsKeyboard }
 }
+
+struct KeyboardDevice: Identifiable, Equatable, Hashable {
+    let id: String
+    var name: String
+    var vendorID: UInt64
+    var productID: UInt64
+    var isBuiltIn: Bool
+    var isConnected: Bool
+
+    var displayName: String {
+        if isBuiltIn { return "内置键盘" }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "外置键盘" : trimmed
+    }
+
+    var subtitle: String {
+        if !isConnected { return "未连接" }
+        if isBuiltIn { return "Mac 自带" }
+        if vendorID == 0 && productID == 0 { return "已连接" }
+        return String(format: "%04X:%04X", vendorID, productID)
+    }
+}

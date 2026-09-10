@@ -22,6 +22,23 @@ struct TaskbarTheme {
     static let footerFill = Color.primary.opacity(0.06)
 }
 
+private extension View {
+    func trayContextMenu(viewModel: TaskbarViewModel) -> some View {
+        contextMenu {
+            Button {
+                viewModel.openActivityMonitor()
+            } label: {
+                Label("活动监视器", systemImage: "chart.bar.xaxis")
+            }
+            Button {
+                viewModel.openSettings()
+            } label: {
+                Label("任务栏设置", systemImage: "gearshape")
+            }
+        }
+    }
+}
+
 struct TaskbarRootView: View {
     @ObservedObject var viewModel: TaskbarViewModel
     @Environment(\.taskbarSize) private var size
@@ -58,26 +75,17 @@ struct TaskbarRootView: View {
                 volume: viewModel.volumeMonitor,
                 clock: viewModel.clockModel,
                 isCalendarOpen: viewModel.isCalendarOpen,
-                onToggleCalendar: { viewModel.toggleCalendarPreview() }
+                onToggleCalendar: { viewModel.toggleCalendarPreview() },
+                onShowDesktop: { viewModel.toggleShowDesktop() }
             )
         }
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .frame(height: size.barHeight)
+        .contentShape(Rectangle())
         .animation(TaskbarMotion.sizeChange, value: size)
         .modifier(TaskbarPointerLock())
-        .contextMenu {
-            Button {
-                viewModel.openActivityMonitor()
-            } label: {
-                Label("活动监视器", systemImage: "chart.bar.xaxis")
-            }
-            Button {
-                viewModel.openSettings()
-            } label: {
-                Label("任务栏设置", systemImage: "gearshape")
-            }
-        }
+        .trayContextMenu(viewModel: viewModel)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(TaskbarTheme.hairline)
@@ -157,6 +165,7 @@ struct TaskbarAppStrip: View {
         .offset(x: offset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipped()
+        .contentShape(Rectangle())
         .background(
             GeometryReader { geo in
                 Color.clear.preference(key: AppStripViewportKey.self, value: geo.size.width)
@@ -181,6 +190,7 @@ struct TaskbarAppStrip: View {
             RoundedRectangle(cornerRadius: size.corner, style: .continuous)
                 .fill(dropTargeted ? TaskbarTheme.hover : Color.clear)
         )
+        .trayContextMenu(viewModel: viewModel)
     }
 
     private func dropBinding(for id: String) -> Binding<Bool> {
@@ -251,7 +261,6 @@ struct StartButton: View {
         Button(action: action) {
             VStack(spacing: 2) {
                 avatar
-                    .scaleEffect(hovering || isOpen ? 1.08 : 1.0)
                 Capsule()
                     .fill(isOpen ? accent.color : Color.clear)
                     .frame(width: isOpen ? size.indicatorActiveWidth : 0, height: size.indicatorHeight)
@@ -359,7 +368,6 @@ struct TaskbarAppButton: View {
                         .offset(y: 1)
                     }
                 }
-                .scaleEffect(hovering ? 1.12 : 1.0)
 
                 Capsule()
                     .fill(item.isRunning ? (item.isActive ? accent.color : Color.primary.opacity(0.45)) : Color.clear)

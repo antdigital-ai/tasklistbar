@@ -461,7 +461,7 @@ struct WeatherIconPulse: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .scaleEffect(on ? 1.04 : 0.97)
+            .opacity(on ? 1 : 0.88)
             .onAppear {
                 withAnimation(.easeInOut(duration: duration).repeatForever(autoreverses: true)) {
                     on = true

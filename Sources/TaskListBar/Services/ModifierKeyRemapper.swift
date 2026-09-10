@@ -1,86 +1,182 @@
 import AppKit
 import Combine
 import Foundation
+import IOKit.hid
 
-/// Persists and applies modifier-key remapping (same idea as System Settings → Keyboard → Modifier Keys).
+/// Persists and applies modifier-key remapping per physical keyboard.
 @MainActor
 final class ModifierKeyRemapper: ObservableObject {
-    private let defaultsKey = "modifierKeyConfiguration"
     private static let hidUsagePageBase: UInt64 = 0x7000_0000_0
+    private static let storeKey = "modifierKeyConfigurationByKeyboard"
+    private static let legacyKey = "modifierKeyConfiguration"
 
-    @Published private(set) var configuration: ModifierKeyConfiguration
+    @Published private(set) var keyboards: [KeyboardDevice] = []
+    @Published private(set) var selectedKeyboardID = ""
+    @Published private(set) var configuration: ModifierKeyConfiguration = .default
     @Published private(set) var lastError: String?
 
+    private var store = Store()
     private var wakeObserver: NSObjectProtocol?
+    private var hidManager: IOHIDManager?
+    private var applyTask: Task<Void, Never>?
+
+    private struct Store: Codable {
+        var configurations: [String: ModifierKeyConfiguration] = [:]
+        var selectedID: String?
+        var names: [String: String] = [:]
+    }
 
     init() {
-        if let data = UserDefaults.standard.data(forKey: defaultsKey),
-           let decoded = try? JSONDecoder().decode(ModifierKeyConfiguration.self, from: data) {
-            configuration = decoded
-        } else {
-            configuration = .default
-        }
-
-        apply(configuration)
-
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.apply(self.configuration)
-            }
-        }
+        loadStore()
+        refreshKeyboards()
+        applyAllConnected()
+        observeWake()
+        startWatchingKeyboards()
     }
 
     deinit {
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
+        if let hidManager {
+            IOHIDManagerUnscheduleFromRunLoop(hidManager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            IOHIDManagerClose(hidManager, IOOptionBits(kIOHIDOptionsTypeNone))
+        }
+    }
+
+    func selectKeyboard(_ id: String) {
+        guard keyboards.contains(where: { $0.id == id }) else { return }
+        selectedKeyboardID = id
+        configuration = store.configurations[id] ?? .default
+        store.selectedID = id
+        persistStore()
     }
 
     func setTarget(_ target: ModifierKeyTarget, for role: ModifierKeyRole) {
         var next = configuration
         next.setTarget(target, for: role)
-        update(next)
+        updateSelected(next)
     }
 
     func applyWindowsKeyboardPreset() {
-        update(.windowsKeyboard)
+        updateSelected(.windowsKeyboard)
     }
 
     func resetToDefault() {
-        update(.default)
+        updateSelected(.default)
     }
 
     func reapply() {
-        apply(configuration)
+        refreshKeyboards()
+        applyAllConnected()
     }
 
-    private func update(_ next: ModifierKeyConfiguration) {
+    private func updateSelected(_ next: ModifierKeyConfiguration) {
         configuration = next
-        save()
-        apply(next)
-    }
-
-    private func save() {
-        if let data = try? JSONEncoder().encode(configuration) {
-            UserDefaults.standard.set(data, forKey: defaultsKey)
+        let id = selectedKeyboardID
+        store.configurations[id] = next
+        persistStore()
+        if let keyboard = keyboards.first(where: { $0.id == id }), keyboard.isConnected {
+            apply(next, to: keyboard)
         }
     }
 
-    private func apply(_ config: ModifierKeyConfiguration) {
-        // Non-default mappings are owned by KeelBar via hidutil. Clear System Settings
-        // mappings first so ⌃/⌘ are not remapped twice.
+    private func loadStore() {
+        if let data = UserDefaults.standard.data(forKey: Self.storeKey),
+           let decoded = try? JSONDecoder().decode(Store.self, from: data) {
+            store = decoded
+        }
+
+        if let data = UserDefaults.standard.data(forKey: Self.legacyKey),
+           let legacy = try? JSONDecoder().decode(ModifierKeyConfiguration.self, from: data) {
+            if store.configurations.isEmpty {
+                store.configurations["builtin"] = legacy
+            }
+            UserDefaults.standard.removeObject(forKey: Self.legacyKey)
+            persistStore()
+        }
+    }
+
+    private func persistStore() {
+        if let data = try? JSONEncoder().encode(store) {
+            UserDefaults.standard.set(data, forKey: Self.storeKey)
+        }
+    }
+
+    private func refreshKeyboards() {
+        var devices = Self.scanKeyboards()
+        let connectedIDs = Set(devices.map(\.id))
+
+        for (id, name) in store.names where !connectedIDs.contains(id) {
+            devices.append(
+                KeyboardDevice(
+                    id: id,
+                    name: name,
+                    vendorID: 0,
+                    productID: 0,
+                    isBuiltIn: id == "builtin",
+                    isConnected: false
+                )
+            )
+        }
+
+        if devices.isEmpty {
+            devices = [
+                KeyboardDevice(id: "builtin", name: "内置键盘", vendorID: 0, productID: 0, isBuiltIn: true, isConnected: true)
+            ]
+        }
+
+        devices.sort {
+            if $0.isConnected != $1.isConnected { return $0.isConnected && !$1.isConnected }
+            if $0.isBuiltIn != $1.isBuiltIn { return $0.isBuiltIn && !$1.isBuiltIn }
+            return $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+        }
+
+        for device in devices where device.isConnected {
+            store.names[device.id] = device.name
+        }
+
+        let previousIDs = Set(keyboards.map(\.id))
+        let newlyConnected = devices.filter { $0.isConnected && !previousIDs.contains($0.id) && !keyboards.isEmpty }
+
+        keyboards = devices
+
+        let preferred = newlyConnected.last?.id
+            ?? store.selectedID.flatMap { id in devices.contains(where: { $0.id == id }) ? id : nil }
+            ?? devices.first(where: \.isConnected)?.id
+            ?? devices.first?.id
+            ?? "builtin"
+
+        selectedKeyboardID = preferred
+        store.selectedID = preferred
+        configuration = store.configurations[preferred] ?? .default
+        persistStore()
+
+        if !newlyConnected.isEmpty {
+            applyAllConnected()
+        }
+    }
+
+    private func applyAllConnected() {
+        clearGlobalMapping()
+        var firstError: String?
+        for keyboard in keyboards where keyboard.isConnected {
+            let config = store.configurations[keyboard.id] ?? .default
+            do {
+                try setUserKeyMapping(buildUserKeyMapping(from: config), matching: keyboard)
+            } catch {
+                firstError = firstError ?? error.localizedDescription
+            }
+        }
+        lastError = firstError
+    }
+
+    private func apply(_ config: ModifierKeyConfiguration, to keyboard: KeyboardDevice) {
         if !config.isIdentity {
             clearSystemModifierMappings()
         }
-
-        let mappings = buildUserKeyMapping(from: config)
         do {
-            try setUserKeyMapping(mappings)
+            try setUserKeyMapping(buildUserKeyMapping(from: config), matching: keyboard)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -103,7 +199,6 @@ final class ModifierKeyRemapper: ObservableObject {
                         ])
                     }
                 } else {
-                    // No Action — map to null usage within the keyboard page.
                     result.append([
                         "HIDKeyboardModifierMappingSrc": src,
                         "HIDKeyboardModifierMappingDst": Self.hidUsagePageBase
@@ -115,30 +210,23 @@ final class ModifierKeyRemapper: ObservableObject {
         return result
     }
 
-    private func setUserKeyMapping(_ mappings: [[String: UInt64]]) throws {
+    private func setUserKeyMapping(_ mappings: [[String: UInt64]], matching keyboard: KeyboardDevice?) throws {
         let payload: [String: Any] = ["UserKeyMapping": mappings]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         guard let json = String(data: data, encoding: .utf8) else {
             throw RemapperError.encodingFailed
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/hidutil")
-        process.arguments = ["property", "--set", json]
-
-        let errPipe = Pipe()
-        process.standardError = errPipe
-        process.standardOutput = Pipe()
-
-        try process.run()
-        process.waitUntilExit()
-
-        if process.terminationStatus != 0 {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let message = String(data: errData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw RemapperError.hidutilFailed(message ?? "exit \(process.terminationStatus)")
+        var arguments = ["property"]
+        if let keyboard {
+            arguments += ["--matching", keyboard.hidutilMatching]
         }
+        arguments += ["--set", json]
+        try Self.runHidutil(arguments)
+    }
+
+    private func clearGlobalMapping() {
+        try? setUserKeyMapping([], matching: nil)
     }
 
     /// Remove System Settings modifier mappings so they don't stack with hidutil.
@@ -153,46 +241,145 @@ final class ModifierKeyRemapper: ObservableObject {
                 CFPreferencesSetValue(key as CFString, nil, appID, user, hostDomain)
             }
         }
-        for keyboardID in connectedKeyboardPreferenceIDs() {
-            CFPreferencesSetValue("\(prefix)\(keyboardID)" as CFString, nil, appID, user, hostDomain)
+        for keyboard in keyboards where keyboard.isConnected {
+            CFPreferencesSetValue("\(prefix)\(keyboard.preferenceID)" as CFString, nil, appID, user, hostDomain)
         }
         CFPreferencesSynchronize(appID, user, hostDomain)
     }
 
-    private func connectedKeyboardPreferenceIDs() -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/hidutil")
-        process.arguments = ["list"]
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = Pipe()
+    private func observeWake() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.reapply()
+            }
+        }
+    }
+
+    private func startWatchingKeyboards() {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let matching: [String: Any] = [
+            kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
+            kIOHIDDeviceUsageKey as String: kHIDUsage_GD_Keyboard
+        ]
+        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, _ in
+            guard let context else { return }
+            let remapper = Unmanaged<ModifierKeyRemapper>.fromOpaque(context).takeUnretainedValue()
+            Task { @MainActor in
+                remapper.scheduleRefresh()
+            }
+        }, context)
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, _ in
+            guard let context else { return }
+            let remapper = Unmanaged<ModifierKeyRemapper>.fromOpaque(context).takeUnretainedValue()
+            Task { @MainActor in
+                remapper.scheduleRefresh()
+            }
+        }, context)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        hidManager = manager
+    }
+
+    private func scheduleRefresh() {
+        applyTask?.cancel()
+        applyTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            refreshKeyboards()
+            applyAllConnected()
+        }
+    }
+
+    private nonisolated static func scanKeyboards() -> [KeyboardDevice] {
+        let output = run("/usr/bin/hidutil", arguments: [
+            "list",
+            "--matching",
+            "{\"PrimaryUsagePage\":1,\"PrimaryUsage\":6}",
+            "--ndjson"
+        ]).output
+        var devices: [KeyboardDevice] = []
+        var seen = Set<String>()
+
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            if let type = object["type"] as? String, type != "service" { continue }
+            let usagePage = intValue(object["PrimaryUsagePage"]) ?? intValue(object["UsagePage"])
+            let usage = intValue(object["PrimaryUsage"]) ?? intValue(object["Usage"])
+            guard usagePage == 1, usage == 6 else { continue }
+
+            let vendor = UInt64(intValue(object["VendorID"]) ?? 0)
+            let product = UInt64(intValue(object["ProductID"]) ?? 0)
+            let name = (object["Product"] as? String) ?? ""
+            let builtIn = boolValue(object["Built-In"]) || boolValue(object["BuiltIn"])
+            let id: String
+            if builtIn && vendor == 0 && product == 0 {
+                id = "builtin"
+            } else if vendor == 0 && product == 0 {
+                id = "name:\(name)"
+            } else {
+                id = "\(vendor)-\(product)"
+            }
+            guard seen.insert(id).inserted else { continue }
+            devices.append(
+                KeyboardDevice(
+                    id: id,
+                    name: name,
+                    vendorID: vendor,
+                    productID: product,
+                    isBuiltIn: builtIn,
+                    isConnected: true
+                )
+            )
+        }
+        return devices
+    }
+
+    private nonisolated static func intValue(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let int = value as? Int { return int }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
+
+    private nonisolated static func boolValue(_ value: Any?) -> Bool {
+        if let bool = value as? Bool { return bool }
+        if let number = value as? NSNumber { return number.boolValue }
+        return false
+    }
+
+    private nonisolated static func runHidutil(_ arguments: [String]) throws {
+        let result = run("/usr/bin/hidutil", arguments: arguments)
+        if result.status != 0 {
+            let message = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RemapperError.hidutilFailed(message.isEmpty ? "exit \(result.status)" : message)
+        }
+    }
+
+    @discardableResult
+    private nonisolated static func run(_ executable: String, arguments: [String]) -> (status: Int32, output: String) {
+        let task = Process()
+        let pipe = Pipe()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = arguments
+        task.standardOutput = pipe
+        task.standardError = pipe
+        task.standardInput = FileHandle.nullDevice
         do {
-            try process.run()
-            process.waitUntilExit()
+            try task.run()
         } catch {
-            return []
+            return (1, error.localizedDescription)
         }
-
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-
-        var ids = Set<String>()
-        // Lines look like: 0x46d    0xc548   ...
-        let pattern = #"^(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines) else {
-            return []
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        regex.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
-            guard let match,
-                  let vendorRange = Range(match.range(at: 1), in: text),
-                  let productRange = Range(match.range(at: 2), in: text),
-                  let vendor = UInt64(String(text[vendorRange]).dropFirst(2), radix: 16),
-                  let product = UInt64(String(text[productRange]).dropFirst(2), radix: 16)
-            else { return }
-            ids.insert("\(vendor)-\(product)-0")
-        }
-        return Array(ids)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        return (task.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 
     enum RemapperError: LocalizedError {
@@ -207,5 +394,21 @@ final class ModifierKeyRemapper: ObservableObject {
                 return "应用修饰键映射失败：\(detail)"
             }
         }
+    }
+}
+
+private extension KeyboardDevice {
+    var hidutilMatching: String {
+        if vendorID != 0 || productID != 0 {
+            return "{\"VendorID\":\(vendorID),\"ProductID\":\(productID),\"PrimaryUsagePage\":1,\"PrimaryUsage\":6}"
+        }
+        let product = name
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "{\"Product\":\"\(product)\",\"PrimaryUsagePage\":1,\"PrimaryUsage\":6}"
+    }
+
+    var preferenceID: String {
+        "\(vendorID)-\(productID)-0"
     }
 }

@@ -35,7 +35,7 @@ final class WindowAvoider {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
-                    self?.schedule(delay: 0.25)
+                    self?.schedule(delay: 0.25, frontmostOnly: true)
                 }
             }
         )
@@ -46,7 +46,7 @@ final class WindowAvoider {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
-                    self?.schedule(delay: 0.28)
+                    self?.schedule(delay: 0.28, frontmostOnly: true)
                 }
             }
         )
@@ -170,6 +170,7 @@ final class WindowAvoider {
 
     private func insetWindows(of app: NSRunningApplication) {
         let element = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.05)
         var windowsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowsRef) == .success,
               let windows = windowsRef as? [AXUIElement]
@@ -181,6 +182,7 @@ final class WindowAvoider {
     }
 
     private func inset(_ window: AXUIElement) {
+        AXUIElementSetMessagingTimeout(window, 0.04)
         guard copyString(window, kAXRoleAttribute as CFString) == (kAXWindowRole as String) else { return }
         if copyString(window, kAXSubroleAttribute as CFString) == (kAXDialogSubrole as String) { return }
         if copyBool(window, kAXMinimizedAttribute as CFString) == true { return }

@@ -391,7 +391,7 @@ struct CategoryFolderCard: View {
                 .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity, alignment: .center)
-            .scaleEffect(hovering ? 1.04 : 1.0)
+            .opacity(hovering ? 1 : 0.92)
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.93))
@@ -431,7 +431,6 @@ struct StartMenuAppCell: View {
                     .interpolation(.medium)
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 40, height: 40)
-                    .scaleEffect(hovering ? 1.08 : 1.0)
                 Text(app.name)
                     .font(.system(size: 11))
                     .foregroundStyle(.primary)
@@ -478,7 +477,6 @@ struct StartMenuAppRow: View {
                     .interpolation(.medium)
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 28, height: 28)
-                    .scaleEffect(hovering ? 1.06 : 1.0)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(app.name)
                         .font(.system(size: 13))

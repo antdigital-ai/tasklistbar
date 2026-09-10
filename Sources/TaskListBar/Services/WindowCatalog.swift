@@ -59,7 +59,7 @@ final class WindowCatalog: ObservableObject {
     private var lastDockExtras = DockExtras(badges: [:], progress: [:])
 
     private var pollIntervalNanoseconds: UInt64 {
-        prefersFastPolling ? 750_000_000 : 2_000_000_000
+        prefersFastPolling ? 1_000_000_000 : 4_000_000_000
     }
 
     func start() {
@@ -100,6 +100,8 @@ final class WindowCatalog: ObservableObject {
         }
         let hungCache = self.hungCache
         let hungCursor = self.hungCursor
+        let scanAXAll = prefersFastPolling
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let shouldReadDock: Bool
         if includeDockExtras {
             dockExtrasTick &+= 1
@@ -113,7 +115,7 @@ final class WindowCatalog: ObservableObject {
         }
         let reuseExtras = lastDockExtras
         scanTask = Task.detached(priority: .utility) { [weak self] in
-            let snapshot = WindowCatalog.scanSnapshot()
+            let snapshot = WindowCatalog.scanSnapshot(axAll: scanAXAll, frontPID: frontPID)
             let extras = shouldReadDock ? WindowCatalog.readDockExtras() : reuseExtras
             let hung = WindowCatalog.probeUnresponsive(
                 pids: snapshot.uiPIDs,
@@ -165,9 +167,14 @@ final class WindowCatalog: ObservableObject {
         }
     }
 
-    nonisolated private static func scanSnapshot() -> Snapshot {
+    nonisolated private static func scanSnapshot(axAll: Bool, frontPID: pid_t?) -> Snapshot {
         let cg = scanCG()
-        let listed = AXIsProcessTrusted() ? scanAXWindows(cg: cg) : cg.onScreenWindows
+        let listed: [CatalogWindow]
+        if AXIsProcessTrusted() {
+            listed = scanAXWindows(cg: cg, axAll: axAll, frontPID: frontPID)
+        } else {
+            listed = cg.onScreenWindows
+        }
         return Snapshot(windows: listed, uiPIDs: cg.uiPIDs, frontmostWindowID: cg.frontmostWindowID)
     }
 
@@ -251,16 +258,23 @@ final class WindowCatalog: ObservableObject {
         )
     }
 
-    nonisolated private static func scanAXWindows(cg: CGScan) -> [CatalogWindow] {
+    nonisolated private static func scanAXWindows(cg: CGScan, axAll: Bool, frontPID: pid_t?) -> [CatalogWindow] {
         var result: [CatalogWindow] = []
-        let pids = cg.uiPIDs.sorted()
+        let pids: [pid_t]
+        if axAll {
+            pids = cg.uiPIDs.sorted()
+        } else if let frontPID, cg.uiPIDs.contains(frontPID) {
+            pids = [frontPID]
+        } else {
+            return cg.onScreenWindows
+        }
         for pid in pids {
             guard let bundleID = cg.bundleByPID[pid] ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
                   bundleID != AppItemFactory.ownBundleID
             else { continue }
 
             let app = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(app, 0.12)
+            AXUIElementSetMessagingTimeout(app, 0.05)
             guard let axWindows = AXHelper.children(app, attribute: kAXWindowsAttribute as CFString) else { continue }
 
             var acceptedIndex = 0
@@ -484,7 +498,7 @@ enum WindowRaiser {
 
     static func isUnresponsive(pid: pid_t) -> Bool {
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.12)
+        AXUIElementSetMessagingTimeout(app, 0.04)
         var ref: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(app, kAXRoleAttribute as CFString, &ref)
         return error == .cannotComplete

@@ -138,6 +138,7 @@ final class TaskbarViewModel: ObservableObject {
         calendarStore.start()
         weatherStore.start()
         favoritesStore.start()
+        boostService.start()
     }
 
     func stopTrayMonitors() {
@@ -148,6 +149,7 @@ final class TaskbarViewModel: ObservableObject {
         clockModel.stop()
         calendarStore.stop()
         favoritesStore.stop()
+        boostService.stop()
     }
 
     private func scheduleRebuild() {
@@ -516,6 +518,11 @@ final class TaskbarViewModel: ObservableObject {
         if FileManager.default.fileExists(atPath: calendar.path) {
             NSWorkspace.shared.open(calendar)
         }
+    }
+
+    func toggleShowDesktop() {
+        closeOverlays()
+        spacesMonitor.toggleShowDesktop()
     }
 
     func openActivityMonitor() {

@@ -9,11 +9,11 @@ enum TaskbarMotion {
     static let calendarAgenda = fluid(0.32)
     static let contentPush = fluid(0.32)
     static let contentPop = fluid(0.28)
-    static let hover = fluid(0.18)
-    static let press = fluid(0.12)
-    static let indicator = fluid(0.22)
-    static let list = fluid(0.30)
-    static let sizeChange = fluid(0.34)
+    static let hover = fluid(0.12)
+    static let press = fluid(0.08)
+    static let indicator = fluid(0.16)
+    static let list = fluid(0.22)
+    static let sizeChange = fluid(0.28)
 
     private static func fluid(_ duration: TimeInterval) -> Animation {
         .timingCurve(0.22, 1.0, 0.36, 1.0, duration: duration)
@@ -34,13 +34,13 @@ enum TaskbarMotion {
 
     enum Panel {
         static let showDuration: TimeInterval = 0.14
-        static let startMenuShowDuration: TimeInterval = 0.28
-        static let startMenuHideDuration: TimeInterval = 0.32
-        static let startMenuFadeBegin: Double = 0.4
-        static let hideDuration: TimeInterval = 0.14
-        static let resizeDuration: TimeInterval = 0.34
+        static let startMenuShowDuration: TimeInterval = 0.16
+        static let startMenuHideDuration: TimeInterval = 0.12
+        static let startMenuFadeBegin: Double = 0.2
+        static let hideDuration: TimeInterval = 0.10
+        static let resizeDuration: TimeInterval = 0.28
         static let startMenuRise: CGFloat = 12
-        static let startMenuFromScale: CGFloat = 0.18
+        static let startMenuFromScale: CGFloat = 0.94
         static let flyoutRise: CGFloat = 12
 
         static var showTiming: CAMediaTimingFunction {
@@ -71,19 +71,19 @@ enum TaskbarMotion {
 }
 
 struct PressableScaleButtonStyle: ButtonStyle {
-    var idleScale: CGFloat = 1
-    var pressedScale: CGFloat = 0.94
+    var pressedScale: CGFloat = 0.97
 
     func makeBody(configuration: Configuration) -> some View {
+        let _ = pressedScale
         Group {
             if #available(macOS 15.0, *) {
                 configuration.label
-                    .scaleEffect(configuration.isPressed ? pressedScale : idleScale)
+                    .opacity(configuration.isPressed ? 0.78 : 1)
                     .animation(TaskbarMotion.press, value: configuration.isPressed)
                     .pointerStyle(.default)
             } else {
                 configuration.label
-                    .scaleEffect(configuration.isPressed ? pressedScale : idleScale)
+                    .opacity(configuration.isPressed ? 0.78 : 1)
                     .animation(TaskbarMotion.press, value: configuration.isPressed)
             }
         }

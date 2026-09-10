@@ -5,14 +5,21 @@ struct ModifierKeysSettingsView: View {
     let onClose: () -> Void
     @Environment(\.taskbarAccent) private var accent
 
+    enum Metrics {
+        static let width: CGFloat = 440
+        static let height: CGFloat = 580
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.25)
-            content
+            ScrollView {
+                content
+            }
             footer
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
@@ -21,7 +28,7 @@ struct ModifierKeysSettingsView: View {
                 Text("修饰键")
                     .font(.system(size: 20, weight: .bold))
                     .foregroundStyle(.primary)
-                Text("为外置键盘调整 Control / Command 等键位，效果与系统设置一致。")
+                Text("每个键盘单独保存修饰键映射，插入后自动套用。")
                     .font(.system(size: 12))
                     .foregroundStyle(.primary.opacity(0.55))
             }
@@ -42,6 +49,7 @@ struct ModifierKeysSettingsView: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
+            keyboardPicker
             presetRow
 
             VStack(spacing: 0) {
@@ -66,7 +74,7 @@ struct ModifierKeysSettingsView: View {
                     .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             )
 
-            Text("更改会立即生效；唤醒后会自动恢复。启用「Windows 键盘」时会接管系统修饰键设置，避免与系统设置重复映射。")
+            Text("更改只作用于当前选中的键盘。唤醒或重新插入时会自动恢复该键盘的设置。")
                 .font(.system(size: 11))
                 .foregroundStyle(.primary.opacity(0.45))
                 .fixedSize(horizontal: false, vertical: true)
@@ -79,6 +87,45 @@ struct ModifierKeysSettingsView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
+    }
+
+    private var currentKeyboard: KeyboardDevice? {
+        remapper.keyboards.first { $0.id == remapper.selectedKeyboardID }
+    }
+
+    private var currentKeyboardLabel: String {
+        currentKeyboard?.displayName ?? "键盘设置"
+    }
+
+    private var currentKeyboardSymbol: String {
+        if currentKeyboard?.isBuiltIn == true { return "laptopcomputer" }
+        return "keyboard"
+    }
+
+    private var keyboardPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("键盘")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary.opacity(0.42))
+            Picker("", selection: Binding(
+                get: { remapper.selectedKeyboardID },
+                set: { remapper.selectKeyboard($0) }
+            )) {
+                ForEach(remapper.keyboards) { keyboard in
+                    Text(keyboardPickerTitle(keyboard)).tag(keyboard.id)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .disabled(remapper.keyboards.isEmpty)
+        }
+    }
+
+    private func keyboardPickerTitle(_ keyboard: KeyboardDevice) -> String {
+        if keyboard.isConnected {
+            return keyboard.displayName
+        }
+        return "\(keyboard.displayName)（未连接）"
     }
 
     private var presetRow: some View {
@@ -105,7 +152,7 @@ struct ModifierKeysSettingsView: View {
 
     private var footer: some View {
         HStack {
-            Label("键盘设置", systemImage: "keyboard")
+            Label(currentKeyboardLabel, systemImage: currentKeyboardSymbol)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.7))
             Spacer()
