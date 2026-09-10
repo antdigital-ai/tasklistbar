@@ -56,10 +56,13 @@ final class WindowCatalog: ObservableObject {
     private var hungCache: [pid_t: (value: Bool, at: Date)] = [:]
     private var hungCursor = 0
     private var dockExtrasTick = 0
+    private var hungTick = 0
     private var lastDockExtras = DockExtras(badges: [:], progress: [:])
+    private var lastCGFingerprint = ""
+    private var bundleByPID: [pid_t: String] = [:]
 
     private var pollIntervalNanoseconds: UInt64 {
-        prefersFastPolling ? 1_000_000_000 : 4_000_000_000
+        prefersFastPolling ? 1_000_000_000 : 6_000_000_000
     }
 
     func start() {
@@ -105,25 +108,45 @@ final class WindowCatalog: ObservableObject {
         let shouldReadDock: Bool
         if includeDockExtras {
             dockExtrasTick &+= 1
-            // Dock AX tree walk is costly; refresh badges/progress every 3rd scan (~6s idle).
-            shouldReadDock = prefersFastPolling || dockExtrasTick % 3 == 1
+            shouldReadDock = prefersFastPolling || dockExtrasTick % 4 == 1
         } else {
             shouldReadDock = false
             if !lastDockExtras.badges.isEmpty || !lastDockExtras.progress.isEmpty {
                 lastDockExtras = DockExtras(badges: [:], progress: [:])
             }
         }
+        hungTick &+= 1
+        let shouldProbeHung = scanAXAll || hungTick % 3 == 1
         let reuseExtras = lastDockExtras
+        let reuseWindows = windows
+        let reuseFingerprint = lastCGFingerprint
+        let reuseHung = HungResult(pids: unresponsivePIDs, cache: hungCache, cursor: hungCursor)
+        let bundleCache = bundleByPID
         scanTask = Task.detached(priority: .utility) { [weak self] in
-            let snapshot = WindowCatalog.scanSnapshot(axAll: scanAXAll, frontPID: frontPID)
-            let extras = shouldReadDock ? WindowCatalog.readDockExtras() : reuseExtras
-            let hung = WindowCatalog.probeUnresponsive(
-                pids: snapshot.uiPIDs,
-                cache: hungCache,
-                cursor: hungCursor
-            )
+            let cg = WindowCatalog.scanCG(bundleCache: bundleCache)
+            let unchanged = !scanAXAll && !cg.fingerprint.isEmpty && cg.fingerprint == reuseFingerprint
+            let snapshot: Snapshot
+            if unchanged, !reuseWindows.isEmpty {
+                snapshot = Snapshot(windows: reuseWindows, uiPIDs: cg.uiPIDs, frontmostWindowID: cg.frontmostWindowID)
+            } else {
+                snapshot = WindowCatalog.finishSnapshot(cg: cg, axAll: scanAXAll, frontPID: frontPID)
+            }
+            let extras = shouldReadDock && !unchanged ? WindowCatalog.readDockExtras() : reuseExtras
+            let hung: HungResult
+            if unchanged || !shouldProbeHung {
+                hung = reuseHung
+            } else {
+                hung = WindowCatalog.probeUnresponsive(
+                    pids: snapshot.uiPIDs,
+                    cache: hungCache,
+                    cursor: hungCursor,
+                    limit: scanAXAll ? 6 : 2
+                )
+            }
             guard let self else { return }
             await MainActor.run {
+                self.lastCGFingerprint = cg.fingerprint
+                self.bundleByPID = cg.bundleByPID
                 self.apply(snapshot, extras: extras, hung: hung)
                 self.scanTask = nil
                 if self.pendingScan {
@@ -167,8 +190,7 @@ final class WindowCatalog: ObservableObject {
         }
     }
 
-    nonisolated private static func scanSnapshot(axAll: Bool, frontPID: pid_t?) -> Snapshot {
-        let cg = scanCG()
+    nonisolated private static func finishSnapshot(cg: CGScan, axAll: Bool, frontPID: pid_t?) -> Snapshot {
         let listed: [CatalogWindow]
         if AXIsProcessTrusted() {
             listed = scanAXWindows(cg: cg, axAll: axAll, frontPID: frontPID)
@@ -183,21 +205,23 @@ final class WindowCatalog: ObservableObject {
         var uiPIDs: Set<pid_t>
         var frontmostWindowID: CGWindowID?
         var bundleByPID: [pid_t: String]
+        var fingerprint: String
     }
 
-    nonisolated private static func scanCG() -> CGScan {
+    nonisolated private static func scanCG(bundleCache: [pid_t: String] = [:]) -> CGScan {
         guard let infoList = CGWindowListCopyWindowInfo(
             [.excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
-            return CGScan(onScreenWindows: [], uiPIDs: [], frontmostWindowID: nil, bundleByPID: [:])
+            return CGScan(onScreenWindows: [], uiPIDs: [], frontmostWindowID: nil, bundleByPID: [:], fingerprint: "")
         }
 
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        var bundleByPID: [pid_t: String] = [:]
+        var bundleByPID = bundleCache
         var onScreenWindows: [CatalogWindow] = []
         var uiPIDs = Set<pid_t>()
         var frontmostWindowID: CGWindowID?
+        var fingerprintParts: [String] = []
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         for info in infoList {
@@ -231,6 +255,7 @@ final class WindowCatalog: ObservableObject {
             if isLikelyDesktopWindow(bundleID: bundleID, title: title, bounds: bounds) { continue }
             if isJunkTitle(title) { continue }
 
+            fingerprintParts.append("\(windowID):\(pid):\(onScreen ? 1 : 0):\(title)")
             if onScreen {
                 onScreenWindows.append(
                     CatalogWindow(
@@ -250,11 +275,13 @@ final class WindowCatalog: ObservableObject {
             }
         }
 
+        bundleByPID = bundleByPID.filter { uiPIDs.contains($0.key) }
         return CGScan(
             onScreenWindows: onScreenWindows,
             uiPIDs: uiPIDs,
             frontmostWindowID: frontmostWindowID,
-            bundleByPID: bundleByPID
+            bundleByPID: bundleByPID,
+            fingerprint: fingerprintParts.joined(separator: "|")
         )
     }
 
@@ -440,7 +467,8 @@ final class WindowCatalog: ObservableObject {
     nonisolated private static func probeUnresponsive(
         pids: Set<pid_t>,
         cache: [pid_t: (value: Bool, at: Date)],
-        cursor: Int
+        cursor: Int,
+        limit: Int = 6
     ) -> HungResult {
         guard AXIsProcessTrusted() else {
             return HungResult(pids: [], cache: [:], cursor: cursor)
@@ -455,7 +483,7 @@ final class WindowCatalog: ObservableObject {
         var result = Set(cache.compactMap { pids.contains($0.key) && $0.value.value ? $0.key : nil })
         var probed = 0
         var index = list.isEmpty ? 0 : cursor % list.count
-        while probed < min(6, list.count) {
+        while probed < min(limit, list.count) {
             let pid = list[index]
             if let cached = cache[pid], now.timeIntervalSince(cached.at) < 2 {
                 if cached.value { result.insert(pid) } else { result.remove(pid) }

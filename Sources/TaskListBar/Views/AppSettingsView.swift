@@ -162,7 +162,7 @@ struct AppSettingsView: View {
                         row(behavior.avoidWindows, divider: behavior.launchAtLogin || behavior.hideDock) {
                             SettingsToggleRow(
                                 title: "最大化时避开底栏",
-                                subtitle: "窗口底部不会压住任务栏",
+                                subtitle: "浏览器和窗口会让出底栏高度",
                                 isOn: Binding(
                                     get: { settings.avoidOverlappingWindows },
                                     set: { settings.setAvoidOverlappingWindows($0) }

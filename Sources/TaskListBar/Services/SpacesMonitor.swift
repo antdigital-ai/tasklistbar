@@ -16,6 +16,7 @@ final class SpacesMonitor: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var debounceTask: Task<Void, Never>?
     private static var axFullscreenCache: (value: Bool, at: Date)?
+    private static let axFullscreenTTL: TimeInterval = 1.2
 
     func start() {
         refresh()
@@ -77,12 +78,12 @@ final class SpacesMonitor: ObservableObject {
         debounceTask?.cancel()
         refresh(updateFullscreen: false)
         debounceTask = Task { [weak self] in
-            for _ in 0..<3 {
-                try? await Task.sleep(nanoseconds: 80_000_000)
+            for _ in 0..<2 {
+                try? await Task.sleep(nanoseconds: 120_000_000)
                 guard !Task.isCancelled else { return }
                 await MainActor.run { self?.probeAndApplyFullscreen(reason: "poll") }
             }
-            try? await Task.sleep(nanoseconds: 160_000_000)
+            try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run { self?.refresh() }
         }
@@ -97,8 +98,8 @@ final class SpacesMonitor: ObservableObject {
 
     func looksFullscreenNow() -> Bool {
         if NSApp.currentSystemPresentationOptions.contains(.fullScreen) { return true }
-        if SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main))?.isFullscreen == true {
-            return true
+        if SpaceAPI.isAvailable {
+            return SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main))?.isFullscreen == true
         }
         return Self.isAXFullscreen()
     }
@@ -114,8 +115,9 @@ final class SpacesMonitor: ObservableObject {
             spaceCount = nextCount
         }
         if updateFullscreen {
-            let next = info.isFullscreen || Self.isAXFullscreen()
+            let next = info.isFullscreen
                 || NSApp.currentSystemPresentationOptions.contains(.fullScreen)
+                || (!SpaceAPI.isAvailable && Self.isAXFullscreen())
             if next != isFullscreenSpace {
                 AppLog.info(
                     "set isFullscreenSpace \(isFullscreenSpace) -> \(next) sky=\(info.isFullscreen) type=\(info.type) \(snapshot())",
@@ -133,7 +135,7 @@ final class SpacesMonitor: ObservableObject {
     }
 
     private static func isAXFullscreen() -> Bool {
-        if let cached = axFullscreenCache, Date().timeIntervalSince(cached.at) < 0.35 {
+        if let cached = axFullscreenCache, Date().timeIntervalSince(cached.at) < axFullscreenTTL {
             return cached.value
         }
         let value = readAXFullscreen()
@@ -192,6 +194,7 @@ final class SpacesMonitor: ObservableObject {
 
 /// Cache SkyLight symbols once — avoid dlopen/dlclose on every refresh.
 private enum SpaceAPI {
+    static var isAvailable: Bool { symbols != nil }
     typealias MainConnectionID = @convention(c) () -> Int32
     typealias CopyManagedDisplaySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
 

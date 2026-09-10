@@ -66,7 +66,7 @@ final class BoostService: ObservableObject {
         let fullCommandLine: Bool
     }
 
-    private static let targets: [Target] = [
+    nonisolated private static let targets: [Target] = [
         // Cursor：只回收 AI agent / 编译类子进程，保留主进程与 Renderer。
         // 切回窗口时 Cursor 会自动重启这些子进程，省去整应用重启的成本。
         Target(label: "Cursor Agent 子进程", patterns: [
@@ -225,7 +225,7 @@ final class BoostService: ObservableObject {
             }
         }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 20, repeating: 20, leeway: .seconds(4))
+        timer.schedule(deadline: .now() + 30, repeating: 30, leeway: .seconds(6))
         timer.setEventHandler { [weak self] in
             self?.samplePressure()
         }

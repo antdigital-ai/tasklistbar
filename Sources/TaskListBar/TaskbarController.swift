@@ -1159,7 +1159,7 @@ final class TaskbarController: NSObject {
                 }
                 self.applyBarHeightConstraints(to: panel)
                 if self.viewModel.appSettings.avoidOverlappingWindows {
-                    self.windowAvoider.setEnabled(true)
+                    self.windowAvoider.refresh()
                 }
             }
         })

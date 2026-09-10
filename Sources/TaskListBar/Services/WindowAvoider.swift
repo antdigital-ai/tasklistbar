@@ -10,12 +10,23 @@ final class WindowAvoider {
     private var observers: [NSObjectProtocol] = []
     private var mouseMonitor: Any?
     private var debounce: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
     private static let promptedKey = "didPromptAccessibilityAccess"
     private var didPrompt = UserDefaults.standard.bool(forKey: WindowAvoider.promptedKey)
     private var enabled = true
 
+    private var axObserver: AXObserver?
+    private var observedPID: pid_t = 0
+    private var observedWindow: AXUIElement?
+    private let callbackBox = CallbackBox()
+
     func start() {
         stop()
+        callbackBox.onEvent = { [weak self] in
+            Task { @MainActor in
+                self?.schedule(delay: 0.16, frontmostOnly: true)
+            }
+        }
         let workspace = NSWorkspace.shared.notificationCenter
         observers.append(
             workspace.addObserver(
@@ -24,6 +35,7 @@ final class WindowAvoider {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
+                    self?.attachFrontmostObserver()
                     self?.schedule(delay: 0.2, frontmostOnly: true)
                 }
             }
@@ -35,6 +47,7 @@ final class WindowAvoider {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
+                    self?.attachFrontmostObserver()
                     self?.schedule(delay: 0.25, frontmostOnly: true)
                 }
             }
@@ -46,6 +59,7 @@ final class WindowAvoider {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor in
+                    self?.attachFrontmostObserver()
                     self?.schedule(delay: 0.28, frontmostOnly: true)
                 }
             }
@@ -62,17 +76,22 @@ final class WindowAvoider {
             }
         )
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
-            guard Self.mouseIsNearTaskbar() else { return }
+            guard Self.mouseSuggestsWindowChange() else { return }
             Task { @MainActor in
-                self?.schedule(delay: 0.4, frontmostOnly: true)
+                self?.schedule(delay: 0.28, frontmostOnly: true)
             }
         }
+        attachFrontmostObserver()
         schedule(delay: 0.5)
     }
 
     func stop() {
         debounce?.cancel()
         debounce = nil
+        retryTask?.cancel()
+        retryTask = nil
+        detachObserver()
+        callbackBox.onEvent = nil
         if let mouseMonitor {
             NSEvent.removeMonitor(mouseMonitor)
             self.mouseMonitor = nil
@@ -89,7 +108,13 @@ final class WindowAvoider {
         self.enabled = enabled
         if enabled {
             schedule(delay: 0.05)
+        } else {
+            detachObserver()
         }
+    }
+
+    func refresh() {
+        schedule(delay: 0.08)
     }
 
     func requestAccess() {
@@ -103,11 +128,15 @@ final class WindowAvoider {
 
     var isTrusted: Bool { AXIsProcessTrusted() }
 
-    private static func mouseIsNearTaskbar() -> Bool {
+    /// Green-button / title-bar zoom is at the top; dragging the bottom edge
+    /// onto the taskbar is at the bottom. Either should re-check inset.
+    private static func mouseSuggestsWindowChange() -> Bool {
         let location = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(location) } ?? NSScreen.main
         guard let screen else { return false }
-        return location.y <= screen.frame.minY + TaskbarMetrics.barHeight + 48
+        let nearBar = location.y <= screen.frame.minY + TaskbarMetrics.barHeight + 48
+        let nearTitle = location.y >= screen.frame.maxY - 56
+        return nearBar || nearTitle
     }
 
     static func openAccessibilitySettings() {
@@ -142,6 +171,7 @@ final class WindowAvoider {
             promptOnceIfNeeded()
             return
         }
+        attachFrontmostObserver()
 
         let apps: [NSRunningApplication]
         if frontmostOnly {
@@ -152,7 +182,7 @@ final class WindowAvoider {
 
         for app in apps {
             guard app.processIdentifier != ownPID else { continue }
-            insetWindows(of: app)
+            insetWindows(of: app, retry: true)
         }
     }
 
@@ -168,55 +198,163 @@ final class WindowAvoider {
         UserDefaults.standard.set(true, forKey: Self.promptedKey)
     }
 
-    private func insetWindows(of app: NSRunningApplication) {
-        let element = AXUIElementCreateApplication(app.processIdentifier)
+    private func insetWindows(of app: NSRunningApplication, retry: Bool) {
+        let pid = app.processIdentifier
+        let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, 0.05)
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windows = windowsRef as? [AXUIElement]
-        else { return }
 
+        var windows: [AXUIElement] = []
+        var windowsRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let listed = windowsRef as? [AXUIElement] {
+            windows = listed
+        }
+        if windows.isEmpty {
+            var focusedRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &focusedRef) == .success,
+               let focusedRef {
+                windows = [focusedRef as! AXUIElement]
+            }
+        }
+        guard !windows.isEmpty else { return }
+
+        var didChange = false
         for window in windows {
-            inset(window)
+            if inset(window) {
+                didChange = true
+            }
+        }
+        if didChange, retry {
+            scheduleRetry(pid: pid)
         }
     }
 
-    private func inset(_ window: AXUIElement) {
-        AXUIElementSetMessagingTimeout(window, 0.04)
-        guard copyString(window, kAXRoleAttribute as CFString) == (kAXWindowRole as String) else { return }
-        if copyString(window, kAXSubroleAttribute as CFString) == (kAXDialogSubrole as String) { return }
-        if copyBool(window, kAXMinimizedAttribute as CFString) == true { return }
-        if copyBool(window, "AXFullScreen" as CFString) == true { return }
-
-        guard let axPosition = copyPoint(window, kAXPositionAttribute as CFString),
-              var axSize = copySize(window, kAXSizeAttribute as CFString)
-        else { return }
-
-        let cocoa = cocoaFrame(axPosition: axPosition, axSize: axSize)
-        guard let screen = screenContaining(cocoa) else { return }
-
-        if isFullscreen(cocoa, on: screen) { return }
-
-        // Tuck a few points under the bar so the other app's bottom-edge
-        // resize handle is covered and cannot sit on the taskbar.
-        let cover: CGFloat = 8
-        let desiredMinY = screen.frame.minY + TaskbarMetrics.barHeight - cover
-        let overlap = desiredMinY - cocoa.minY
-        guard overlap > 4 else { return }
-
-        let touchesBottom = cocoa.minY <= screen.frame.minY + 10
-        let isTall = cocoa.height >= min(420, screen.visibleFrame.height * 0.55)
-        guard touchesBottom, isTall else { return }
-        guard axSize.height - overlap > 120 else { return }
-
-        axSize.height -= overlap
-        setSize(window, axSize)
+    private func scheduleRetry(pid: pid_t) {
+        retryTask?.cancel()
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let app = NSRunningApplication(processIdentifier: pid),
+                      app.processIdentifier != 0
+                else { return }
+                self?.insetWindows(of: app, retry: false)
+            }
+        }
     }
 
-    private func isFullscreen(_ frame: CGRect, on screen: NSScreen) -> Bool {
-        abs(frame.minX - screen.frame.minX) < 4
-            && abs(frame.width - screen.frame.width) < 4
-            && abs(frame.height - screen.frame.height) < 4
+    @discardableResult
+    private func inset(_ window: AXUIElement) -> Bool {
+        AXUIElementSetMessagingTimeout(window, 0.04)
+        guard copyString(window, kAXRoleAttribute as CFString) == (kAXWindowRole as String) else { return false }
+        if copyString(window, kAXSubroleAttribute as CFString) == (kAXDialogSubrole as String) { return false }
+        if copyBool(window, kAXMinimizedAttribute as CFString) == true { return false }
+        // Native Space fullscreen stays untouched; the taskbar hides instead.
+        if copyBool(window, "AXFullScreen" as CFString) == true { return false }
+
+        guard let axPosition = copyPoint(window, kAXPositionAttribute as CFString),
+              let axSize = copySize(window, kAXSizeAttribute as CFString)
+        else { return false }
+
+        let cocoa = cocoaFrame(axPosition: axPosition, axSize: axSize)
+        guard let screen = screenContaining(cocoa) else { return false }
+
+        // 2pt tuck hides the hairline without covering page content / chat input.
+        let cover: CGFloat = 2
+        let desiredMinY = screen.frame.minY + TaskbarMetrics.barHeight - cover
+        let overlap = desiredMinY - cocoa.minY
+        guard overlap > 4 else { return false }
+
+        let isTall = cocoa.height >= min(420, screen.visibleFrame.height * 0.55)
+        let fillsWidth = abs(cocoa.width - screen.frame.width) < 24
+            || abs(cocoa.width - screen.visibleFrame.width) < 24
+        let fillsHeight = cocoa.height >= screen.visibleFrame.height * 0.82
+            || abs(cocoa.height - screen.frame.height) < 12
+        let sitsOnBottom = cocoa.minY <= screen.frame.minY + 12
+        let looksMaximized = (sitsOnBottom && isTall) || (fillsWidth && fillsHeight)
+        guard looksMaximized else { return false }
+
+        let newHeight = cocoa.maxY - desiredMinY
+        guard newHeight > 120 else { return false }
+
+        if copyBool(window, "AXZoomed" as CFString) == true {
+            setBool(window, "AXZoomed" as CFString, false)
+        }
+        setPoint(window, axPosition)
+        setSize(window, CGSize(width: axSize.width, height: newHeight))
+        return true
+    }
+
+    private func attachFrontmostObserver() {
+        guard enabled, AXIsProcessTrusted() else { return }
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ownPID,
+              app.activationPolicy == .regular
+        else {
+            detachObserver()
+            return
+        }
+
+        let pid = app.processIdentifier
+        if pid != observedPID || axObserver == nil {
+            detachObserver()
+            var observer: AXObserver?
+            let result = AXObserverCreate(pid, { _, _, _, refcon in
+                guard let refcon else { return }
+                Unmanaged<CallbackBox>.fromOpaque(refcon).takeUnretainedValue().ping()
+            }, &observer)
+            guard result == .success, let observer else { return }
+
+            let appElement = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(appElement, 0.05)
+            let refcon = Unmanaged.passUnretained(callbackBox).toOpaque()
+            _ = AXObserverAddNotification(observer, appElement, kAXWindowCreatedNotification as CFString, refcon)
+            _ = AXObserverAddNotification(observer, appElement, kAXFocusedWindowChangedNotification as CFString, refcon)
+            CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+            axObserver = observer
+            observedPID = pid
+        }
+        attachFocusedWindowNotifications(for: pid)
+    }
+
+    private func attachFocusedWindowNotifications(for pid: pid_t) {
+        guard let observer = axObserver else { return }
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.05)
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedRef) == .success,
+              let focusedRef
+        else { return }
+        let window = focusedRef as! AXUIElement
+        if let current = observedWindow, CFEqual(current, window) {
+            return
+        }
+        if let current = observedWindow {
+            AXObserverRemoveNotification(observer, current, kAXResizedNotification as CFString)
+            AXObserverRemoveNotification(observer, current, kAXMovedNotification as CFString)
+        }
+        let refcon = Unmanaged.passUnretained(callbackBox).toOpaque()
+        _ = AXObserverAddNotification(observer, window, kAXResizedNotification as CFString, refcon)
+        _ = AXObserverAddNotification(observer, window, kAXMovedNotification as CFString, refcon)
+        observedWindow = window
+    }
+
+    private func detachObserver() {
+        if let observer = axObserver {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+            if observedPID != 0 {
+                let app = AXUIElementCreateApplication(observedPID)
+                AXObserverRemoveNotification(observer, app, kAXWindowCreatedNotification as CFString)
+                AXObserverRemoveNotification(observer, app, kAXFocusedWindowChangedNotification as CFString)
+            }
+            if let window = observedWindow {
+                AXObserverRemoveNotification(observer, window, kAXResizedNotification as CFString)
+                AXObserverRemoveNotification(observer, window, kAXMovedNotification as CFString)
+            }
+        }
+        axObserver = nil
+        observedPID = 0
+        observedWindow = nil
     }
 
     private func screenContaining(_ frame: CGRect) -> NSScreen? {
@@ -274,9 +412,27 @@ final class WindowAvoider {
         return size
     }
 
+    private func setPoint(_ element: AXUIElement, _ point: CGPoint) {
+        var mutable = point
+        guard let value = AXValueCreate(.cgPoint, &mutable) else { return }
+        AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value)
+    }
+
     private func setSize(_ element: AXUIElement, _ size: CGSize) {
         var mutable = size
         guard let value = AXValueCreate(.cgSize, &mutable) else { return }
         AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value)
+    }
+
+    private func setBool(_ element: AXUIElement, _ attribute: CFString, _ value: Bool) {
+        AXUIElementSetAttributeValue(element, attribute, value as CFBoolean)
+    }
+}
+
+private final class CallbackBox: @unchecked Sendable {
+    var onEvent: (() -> Void)?
+
+    func ping() {
+        onEvent?()
     }
 }

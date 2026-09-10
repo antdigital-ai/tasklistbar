@@ -155,7 +155,7 @@ final class TaskbarViewModel: ObservableObject {
     private func scheduleRebuild() {
         rebuildTask?.cancel()
         rebuildTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            try? await Task.sleep(nanoseconds: 80_000_000)
             guard !Task.isCancelled else { return }
             rebuildItems()
         }
