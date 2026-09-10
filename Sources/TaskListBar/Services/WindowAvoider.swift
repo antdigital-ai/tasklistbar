@@ -24,7 +24,7 @@ final class WindowAvoider {
         stop()
         callbackBox.onEvent = { [weak self] in
             Task { @MainActor in
-                self?.schedule(delay: 0.16, frontmostOnly: true)
+                self?.schedule(delay: 0.35, frontmostOnly: true)
             }
         }
         let workspace = NSWorkspace.shared.notificationCenter
@@ -82,7 +82,7 @@ final class WindowAvoider {
             }
         }
         attachFrontmostObserver()
-        schedule(delay: 0.5)
+        schedule(delay: 0.5, frontmostOnly: true)
     }
 
     func stop() {
@@ -168,7 +168,6 @@ final class WindowAvoider {
     private func adjust(frontmostOnly: Bool) {
         guard enabled else { return }
         guard AXIsProcessTrusted() else { return }
-        attachFrontmostObserver()
 
         let apps: [NSRunningApplication]
         if frontmostOnly {

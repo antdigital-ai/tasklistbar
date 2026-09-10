@@ -91,7 +91,10 @@ final class SpacesMonitor: ObservableObject {
 
     func probeAndApplyFullscreen(reason: String = "probe") {
         guard looksFullscreenNow(), !isFullscreenSpace else { return }
-        AppLog.info("hide now reason=\(reason) \(snapshot())", category: "fullscreen")
+        AppLog.info(
+            "hide now reason=\(reason) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?") space=\(currentSpace)/\(spaceCount)",
+            category: "fullscreen"
+        )
         isFullscreenSpace = true
         onFullscreenDetected?()
     }
@@ -120,18 +123,12 @@ final class SpacesMonitor: ObservableObject {
                 || (!SpaceAPI.isAvailable && Self.isAXFullscreen())
             if next != isFullscreenSpace {
                 AppLog.info(
-                    "set isFullscreenSpace \(isFullscreenSpace) -> \(next) sky=\(info.isFullscreen) type=\(info.type) \(snapshot())",
+                    "set isFullscreenSpace \(isFullscreenSpace) -> \(next) sky=\(info.isFullscreen) type=\(info.type) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?") space=\(nextCurrent)/\(nextCount)",
                     category: "fullscreen"
                 )
                 isFullscreenSpace = next
             }
         }
-    }
-
-    private func snapshot() -> String {
-        let info = SpaceAPI.readSpaces(displayUUID: Self.displayUUID(for: NSScreen.main))
-        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
-        return "sky=\(info?.isFullscreen ?? false) type=\(info?.type ?? -1) front=\(front) space=\(currentSpace)/\(spaceCount)"
     }
 
     private static func isAXFullscreen() -> Bool {

@@ -212,20 +212,8 @@ final class BoostService: ObservableObject {
 
     func start() {
         samplePressure()
-        queue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            let groups = Self.scanProcesses()
-            let disks = Self.scanDiskSync()
-            Task { @MainActor in
-                guard let self else { return }
-                self.lastGroups = groups
-                self.groupsCachedAt = Date()
-                self.lastDisks = disks
-                self.disksCachedAt = Date()
-                self.disksCached = true
-            }
-        }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 30, repeating: 30, leeway: .seconds(6))
+        timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(12))
         timer.setEventHandler { [weak self] in
             self?.samplePressure()
         }

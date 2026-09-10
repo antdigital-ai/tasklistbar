@@ -45,7 +45,12 @@ final class WindowCatalog: ObservableObject {
     @Published private(set) var frontmostWindowID: CGWindowID?
 
     /// Faster scans while the window-list popover is open; quieter otherwise.
-    var prefersFastPolling = false
+    var prefersFastPolling = false {
+        didSet {
+            guard prefersFastPolling, prefersFastPolling != oldValue else { return }
+            refresh()
+        }
+    }
     /// Dock AX badge/progress walks are expensive — skip when badges are disabled.
     var includeDockExtras = true
 
@@ -56,13 +61,12 @@ final class WindowCatalog: ObservableObject {
     private var hungCache: [pid_t: (value: Bool, at: Date)] = [:]
     private var hungCursor = 0
     private var dockExtrasTick = 0
-    private var hungTick = 0
     private var lastDockExtras = DockExtras(badges: [:], progress: [:])
     private var lastCGFingerprint = ""
     private var bundleByPID: [pid_t: String] = [:]
 
     private var pollIntervalNanoseconds: UInt64 {
-        prefersFastPolling ? 1_000_000_000 : 6_000_000_000
+        prefersFastPolling ? 1_000_000_000 : 12_000_000_000
     }
 
     func start() {
@@ -108,15 +112,14 @@ final class WindowCatalog: ObservableObject {
         let shouldReadDock: Bool
         if includeDockExtras {
             dockExtrasTick &+= 1
-            shouldReadDock = prefersFastPolling || dockExtrasTick % 4 == 1
+            shouldReadDock = prefersFastPolling || dockExtrasTick % 6 == 1
         } else {
             shouldReadDock = false
             if !lastDockExtras.badges.isEmpty || !lastDockExtras.progress.isEmpty {
                 lastDockExtras = DockExtras(badges: [:], progress: [:])
             }
         }
-        hungTick &+= 1
-        let shouldProbeHung = scanAXAll || hungTick % 3 == 1
+        let shouldProbeHung = scanAXAll
         let reuseExtras = lastDockExtras
         let reuseWindows = windows
         let reuseFingerprint = lastCGFingerprint
@@ -161,10 +164,13 @@ final class WindowCatalog: ObservableObject {
         hungCache = hung.cache
         hungCursor = hung.cursor
         lastDockExtras = extras
-        let signature = snapshot.signature
+        var signature = snapshot.identity
             + "|b:\(extras.badges.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","))"
             + "|p:\(extras.progress.sorted { $0.key < $1.key }.map { "\($0.key)=\(Int($0.value * 100))" }.joined(separator: ","))"
             + "|h:\(hung.pids.sorted().map(String.init).joined(separator: ","))"
+        if prefersFastPolling {
+            signature += "|t:" + snapshot.windows.map(\.title).joined(separator: "\u{1e}")
+        }
 
         guard signature != lastSignature else { return }
         lastSignature = signature
@@ -181,9 +187,9 @@ final class WindowCatalog: ObservableObject {
         var uiPIDs: Set<pid_t>
         var frontmostWindowID: CGWindowID?
 
-        var signature: String {
+        var identity: String {
             let windowPart = windows
-                .map { "\($0.bundleID)#\($0.windowID):\($0.title):\($0.isMinimized ? 1 : 0):\($0.isOnScreen ? 1 : 0)" }
+                .map { "\($0.bundleID)#\($0.windowID):\($0.isMinimized ? 1 : 0):\($0.isOnScreen ? 1 : 0)" }
                 .joined(separator: "|")
             let pidPart = uiPIDs.sorted().map(String.init).joined(separator: ",")
             return "\(windowPart)<\(pidPart)><\(frontmostWindowID ?? 0)>"
@@ -255,7 +261,7 @@ final class WindowCatalog: ObservableObject {
             if isLikelyDesktopWindow(bundleID: bundleID, title: title, bounds: bounds) { continue }
             if isJunkTitle(title) { continue }
 
-            fingerprintParts.append("\(windowID):\(pid):\(onScreen ? 1 : 0):\(title)")
+            fingerprintParts.append("\(windowID):\(pid):\(onScreen ? 1 : 0)")
             if onScreen {
                 onScreenWindows.append(
                     CatalogWindow(

@@ -159,7 +159,7 @@ final class TaskbarViewModel: ObservableObject {
     private func scheduleRebuild() {
         rebuildTask?.cancel()
         rebuildTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 80_000_000)
+            try? await Task.sleep(nanoseconds: 120_000_000)
             guard !Task.isCancelled else { return }
             rebuildItems()
         }
@@ -264,7 +264,7 @@ final class TaskbarViewModel: ObservableObject {
                 let active = (frontID == app.bid || (isWindowListOpen && windowListBundleID == app.bid)) ? 1 : 0
                 let windowPart = grouped
                     ? "g\(app.windows.count)"
-                    : app.windows.map { "\($0.windowID):\($0.title)" }.joined(separator: "+")
+                    : app.windows.map { "\($0.windowID)" }.joined(separator: "+")
                 signatureParts.append(
                     "\(app.bid):\(app.running == nil ? 0 : 1)\(active)\(app.isPinned ? 1 : 0)|\(windowPart)|\(badge)|\(progress)|\(hung ? 1 : 0)|\(grouped ? 1 : 0)"
                 )
