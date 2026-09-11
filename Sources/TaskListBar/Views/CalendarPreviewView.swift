@@ -32,6 +32,7 @@ struct CalendarPreviewView: View {
     @State private var displayedMonth: Date = Date()
     @State private var selectedDay: Date = Date()
     @State private var monthForward = true
+    @State private var pageToken = 0
 
     private let calendar = Calendar.current
     private let weekendPink = Color(red: 1.00, green: 0.48, blue: 0.50)
@@ -84,16 +85,13 @@ struct CalendarPreviewView: View {
             }
 
             if isAgendaExpanded {
-                Color.black.opacity(0.32)
+                Color.black.opacity(0.28)
                     .contentShape(Rectangle())
                     .onTapGesture { collapseAgenda() }
                     .transition(.opacity)
 
                 agendaPopup
-                    .transition(
-                        .scale(scale: 0.88, anchor: .center)
-                            .combined(with: .opacity)
-                    )
+                    .transition(TaskbarMotion.calendarAgendaTransition())
             }
         }
         .frame(
@@ -107,7 +105,6 @@ struct CalendarPreviewView: View {
         .animation(TaskbarMotion.calendarExpand, value: isMonthExpanded)
         .animation(TaskbarMotion.calendarAgenda, value: isAgendaExpanded)
         .clipped()
-        .animation(TaskbarMotion.calendarExpand, value: heroKind)
         .onAppear {
             displayedMonth = startOfMonth(for: clock.now)
             selectedDay = calendar.startOfDay(for: clock.now)
@@ -193,7 +190,6 @@ struct CalendarPreviewView: View {
 
                 HStack(spacing: 5) {
                     weatherIcon(heroKind, night: isNight, size: 14)
-                        .modifier(WeatherIconPulse(kind: heroKind, isNight: isNight))
                     Text(heroKind.label)
                         .font(.system(size: 13, weight: .medium))
                 }
@@ -272,13 +268,15 @@ struct CalendarPreviewView: View {
                 shift(by: -1)
             }
 
-            Text(toolbarTitle)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .contentTransition(.opacity)
-                .id(toolbarTitle)
-                .transition(TaskbarMotion.pushTransition(forward: monthForward))
+            ZStack {
+                Text(toolbarTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .id(toolbarTitle)
+                    .transition(TaskbarMotion.calendarPageTransition(forward: monthForward))
+            }
+            .frame(maxWidth: .infinity)
+            .clipped()
 
             navButton(systemName: "chevron.right") {
                 shift(by: 1)
@@ -286,8 +284,7 @@ struct CalendarPreviewView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .animation(TaskbarMotion.contentPush, value: displayedMonth)
-        .animation(TaskbarMotion.contentPush, value: selectedDay)
+        .animation(TaskbarMotion.calendarPage, value: toolbarTitle)
     }
 
     private var toolbarTitle: String {
@@ -326,32 +323,22 @@ struct CalendarPreviewView: View {
     }
 
     private var dayGrid: some View {
-        Group {
-            if isMonthExpanded {
-                monthGrid
-            } else {
-                weekGrid
-            }
+        ZStack {
+            calendarPage
+                .id(pageToken)
+                .transition(TaskbarMotion.calendarPageTransition(forward: monthForward))
         }
         .padding(.horizontal, 4)
         .padding(.bottom, 2)
+        .clipped()
+        .animation(TaskbarMotion.calendarPage, value: pageToken)
         .animation(TaskbarMotion.calendarExpand, value: isMonthExpanded)
-        .animation(TaskbarMotion.contentPush, value: displayedMonth)
-        .animation(TaskbarMotion.contentPush, value: selectedDay)
     }
 
-    private var weekGrid: some View {
-        let days = weekDays(containing: selectedDay)
-        return HStack(spacing: 0) {
-            ForEach(days, id: \.self) { day in
-                dayCell(day)
-            }
-        }
-        .frame(height: Metrics.weekGridHeight)
-    }
-
-    private var monthGrid: some View {
+    private var calendarPage: some View {
         let days = monthDays(for: displayedMonth)
+        let weekRow = focusedWeekRow(in: days)
+        let rowStride = Metrics.dayCell + Metrics.rowSpacing
         return VStack(spacing: Metrics.rowSpacing) {
             ForEach(0..<Metrics.monthRows, id: \.self) { row in
                 HStack(spacing: 0) {
@@ -360,9 +347,15 @@ struct CalendarPreviewView: View {
                         dayCell(index < days.count ? days[index] : nil)
                     }
                 }
+                .frame(height: Metrics.dayCell)
             }
         }
-        .frame(height: Metrics.monthGridHeight, alignment: .top)
+        .offset(y: isMonthExpanded ? 0 : -CGFloat(weekRow) * rowStride)
+        .frame(
+            height: isMonthExpanded ? Metrics.monthGridHeight : Metrics.weekGridHeight,
+            alignment: .top
+        )
+        .clipped()
     }
 
     private var expandCornerButton: some View {
@@ -374,9 +367,10 @@ struct CalendarPreviewView: View {
                 }
             }
         } label: {
-            Image(systemName: isMonthExpanded ? "chevron.up" : "chevron.down")
+            Image(systemName: "chevron.down")
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.white)
+                .rotationEffect(.degrees(isMonthExpanded ? 180 : 0))
                 .frame(width: 22, height: 22)
                 .background(
                     Circle()
@@ -384,6 +378,7 @@ struct CalendarPreviewView: View {
                 )
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
+        .animation(TaskbarMotion.calendarExpand, value: isMonthExpanded)
         .help(isMonthExpanded ? "收起" : "展开")
     }
 
@@ -424,7 +419,9 @@ struct CalendarPreviewView: View {
                                 .background(
                                     Circle()
                                         .fill(isToday ? Color.white : (isSelected ? Color.white.opacity(0.28) : Color.clear))
+                                        .scaleEffect(isToday || isSelected ? 1 : 0.72)
                                 )
+                                .animation(TaskbarMotion.calendarDay, value: isSelected)
                                 .overlay(alignment: .topTrailing) {
                                     if isRest {
                                         Text("休")
@@ -636,17 +633,27 @@ struct CalendarPreviewView: View {
         collapseAgenda()
         if isMonthExpanded {
             guard let next = calendar.date(byAdding: .month, value: value, to: displayedMonth) else { return }
-            withAnimation(TaskbarMotion.contentPush) {
+            withAnimation(TaskbarMotion.calendarPage) {
+                pageToken += 1
                 displayedMonth = startOfMonth(for: next)
                 selectedDay = defaultSelectedDay(in: displayedMonth)
             }
         } else {
             guard let next = calendar.date(byAdding: .day, value: value * 7, to: selectedDay) else { return }
-            withAnimation(TaskbarMotion.contentPush) {
+            withAnimation(TaskbarMotion.calendarPage) {
+                pageToken += 1
                 selectedDay = calendar.startOfDay(for: next)
                 displayedMonth = startOfMonth(for: selectedDay)
             }
         }
+    }
+
+    private func focusedWeekRow(in days: [Date?]) -> Int {
+        for (index, day) in days.enumerated() {
+            guard let day, calendar.isDate(day, inSameDayAs: selectedDay) else { continue }
+            return index / 7
+        }
+        return 0
     }
 
     private func defaultSelectedDay(in month: Date) -> Date {

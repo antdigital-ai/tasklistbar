@@ -677,18 +677,10 @@ final class TaskbarController: NSObject {
     private func syncCalendarVisibility() {
         if viewModel.isCalendarOpen {
             createCalendarPanelIfNeeded()
-            animatePanel(
-                calendarPanel,
-                show: true,
-                target: calendarTargetFrame()
-            )
+            animateCalendar(show: true)
             NSApp.activate(ignoringOtherApps: true)
         } else {
-            animatePanel(
-                calendarPanel,
-                show: false,
-                target: calendarTargetFrame()
-            )
+            animateCalendar(show: false)
         }
     }
 
@@ -753,6 +745,92 @@ final class TaskbarController: NSObject {
                 target: permissionsTargetFrame()
             )
         }
+    }
+
+    private func animateCalendar(show: Bool) {
+        guard let panel = calendarPanel else { return }
+        let target = calendarTargetFrame()
+        if panel.frame != target {
+            panel.setFrame(target, display: false)
+        }
+
+        guard let content = panel.contentView, let layer = content.layer else {
+            animatePanel(
+                panel,
+                show: show,
+                target: target,
+                duration: show ? TaskbarMotion.Panel.calendarShowDuration : TaskbarMotion.Panel.calendarHideDuration
+            )
+            return
+        }
+
+        resetLayerGeometry(layer)
+        let hidden = calendarPopTransform(
+            scale: TaskbarMotion.Panel.calendarFromScale,
+            in: content,
+            layer: layer
+        )
+
+        if show {
+            panel.alphaValue = 1
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.transform = hidden
+            layer.opacity = 0
+            CATransaction.commit()
+            panel.orderFrontRegardless()
+            content.layoutSubtreeIfNeeded()
+            animateStartMenuLayer(
+                layer,
+                fromTransform: hidden,
+                fromOpacity: 0,
+                toTransform: CATransform3DIdentity,
+                toOpacity: 1,
+                duration: TaskbarMotion.Panel.calendarShowDuration,
+                timing: TaskbarMotion.Panel.showTiming,
+                completion: nil
+            )
+        } else if panel.isVisible {
+            let fromTransform = layer.presentation()?.transform ?? CATransform3DIdentity
+            let fromOpacity = layer.presentation()?.opacity ?? layer.opacity
+            animateStartMenuLayer(
+                layer,
+                fromTransform: fromTransform,
+                fromOpacity: fromOpacity,
+                toTransform: hidden,
+                toOpacity: 0,
+                duration: TaskbarMotion.Panel.calendarHideDuration,
+                timing: TaskbarMotion.Panel.hideTiming
+            ) { [weak panel] in
+                guard let panel else { return }
+                panel.orderOut(nil)
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                panel.contentView?.layer?.transform = CATransform3DIdentity
+                panel.contentView?.layer?.opacity = 1
+                CATransaction.commit()
+            }
+        }
+    }
+
+    private func calendarPopTransform(scale: CGFloat, in view: NSView, layer: CALayer) -> CATransform3D {
+        let bounds = layer.bounds.width > 1 ? layer.bounds : view.bounds
+        let flipped = view.isFlipped || layer.isGeometryFlipped
+        let pivot = CGPoint(
+            x: bounds.maxX,
+            y: flipped ? bounds.maxY : bounds.minY
+        )
+        let anchor = CGPoint(
+            x: bounds.minX + layer.anchorPoint.x * bounds.width,
+            y: bounds.minY + layer.anchorPoint.y * bounds.height
+        )
+        let px = pivot.x - anchor.x
+        let py = pivot.y - anchor.y
+        var transform = CATransform3DIdentity
+        transform = CATransform3DTranslate(transform, px, py, 0)
+        transform = CATransform3DScale(transform, scale, scale, 1)
+        transform = CATransform3DTranslate(transform, -px, -py, 0)
+        return transform
     }
 
     private func animateStartMenu(show: Bool, onShown: (() -> Void)? = nil) {

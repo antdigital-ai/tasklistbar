@@ -5,8 +5,10 @@ import SwiftUI
 enum TaskbarMotion {
     static let panelSpring = fluid(0.36)
     static let panelAppear = fluid(0.34)
-    static let calendarExpand = fluid(0.38)
-    static let calendarAgenda = fluid(0.32)
+    static let calendarExpand = Animation.timingCurve(0.16, 1.0, 0.28, 1.0, duration: 0.44)
+    static let calendarPage = Animation.timingCurve(0.22, 0.92, 0.18, 1.0, duration: 0.36)
+    static let calendarDay = Animation.spring(response: 0.34, dampingFraction: 0.78)
+    static let calendarAgenda = Animation.timingCurve(0.18, 1.0, 0.28, 1.0, duration: 0.36)
     static let contentPush = fluid(0.32)
     static let contentPop = fluid(0.28)
     static let hover = fluid(0.12)
@@ -20,11 +22,22 @@ enum TaskbarMotion {
     }
 
     static func pushTransition(forward: Bool) -> AnyTransition {
-        let incoming: CGFloat = forward ? 22 : -22
-        let outgoing: CGFloat = forward ? -16 : 16
-        return .asymmetric(
-            insertion: .offset(x: incoming).combined(with: .opacity),
-            removal: .offset(x: outgoing).combined(with: .opacity)
+        calendarPageTransition(forward: forward)
+    }
+
+    static func calendarPageTransition(forward: Bool) -> AnyTransition {
+        .asymmetric(
+            insertion: .offset(x: forward ? 40 : -40).combined(with: .opacity),
+            removal: .offset(x: forward ? -28 : 28).combined(with: .opacity)
+        )
+    }
+
+    static func calendarAgendaTransition() -> AnyTransition {
+        .asymmetric(
+            insertion: .opacity
+                .combined(with: .offset(y: 22))
+                .combined(with: .scale(scale: 0.96, anchor: .bottom)),
+            removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .bottom))
         )
     }
 
@@ -38,7 +51,10 @@ enum TaskbarMotion {
         static let startMenuHideDuration: TimeInterval = 0.12
         static let startMenuFadeBegin: Double = 0.2
         static let hideDuration: TimeInterval = 0.10
-        static let resizeDuration: TimeInterval = 0.28
+        static let resizeDuration: TimeInterval = 0.44
+        static let calendarShowDuration: TimeInterval = 0.22
+        static let calendarHideDuration: TimeInterval = 0.14
+        static let calendarFromScale: CGFloat = 0.96
         static let startMenuRise: CGFloat = 12
         static let startMenuFromScale: CGFloat = 0.94
         static let flyoutRise: CGFloat = 12
