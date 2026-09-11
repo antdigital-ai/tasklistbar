@@ -14,7 +14,7 @@ struct SystemTrayView: View {
     @Environment(\.taskbarSize) private var size
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 1) {
             if battery.status.isPresent {
                 BatteryTrayButton(status: battery.status)
             }
@@ -38,13 +38,73 @@ struct SystemTrayView: View {
             ShowDesktopTrayButton(action: { onShowDesktop?() })
         }
         .frame(height: size.trayHit)
-        .padding(.trailing, 2)
+        .padding(.trailing, 1)
+    }
+}
+
+/// Shared macOS-style chrome for every compact tray symbol. SF Symbols handles
+/// optical sizing; the fixed hit target keeps baselines and hover shapes aligned.
+private struct TraySymbol: View {
+    let name: String
+    var color: Color = .primary.opacity(0.86)
+    var isHighlighted = false
+    var weight: Font.Weight = .regular
+
+    @Environment(\.taskbarSize) private var size
+
+    var body: some View {
+        Image(systemName: name)
+            .symbolRenderingMode(.monochrome)
+            .font(.system(size: size.traySymbol, weight: weight))
+            .foregroundStyle(color)
+            .frame(width: size.trayHit, height: size.trayHit)
+            .background(
+                RoundedRectangle(cornerRadius: size.trayHit * 0.28, style: .continuous)
+                    .fill(isHighlighted ? TaskbarTheme.hover : Color.clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: size.trayHit * 0.28, style: .continuous))
+    }
+}
+
+/// Bluetooth is a native menu-extra glyph rather than a public SF Symbol.
+/// Reuse Apple's template image so its geometry matches the macOS menu bar.
+private struct TrayBluetoothSymbol: View {
+    var isPoweredOn: Bool
+    var isHighlighted: Bool
+
+    @Environment(\.taskbarSize) private var size
+
+    private static let systemImage: NSImage = {
+        NSImage(named: NSImage.Name("NSBluetoothTemplate"))
+            ?? NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "蓝牙")
+            ?? NSImage()
+    }()
+
+    var body: some View {
+        ZStack {
+            Image(nsImage: Self.systemImage)
+                .renderingMode(.template)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size.traySymbol * 0.78, height: size.traySymbol * 1.06)
+
+            if !isPoweredOn {
+                Image(systemName: "slash")
+                    .font(.system(size: size.traySymbol * 1.08, weight: .medium))
+            }
+        }
+        .foregroundStyle(Color.primary.opacity(isPoweredOn ? 0.88 : 0.38))
+        .frame(width: size.trayHit, height: size.trayHit)
+        .background(
+            RoundedRectangle(cornerRadius: size.trayHit * 0.28, style: .continuous)
+                .fill(isHighlighted ? TaskbarTheme.hover : Color.clear)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: size.trayHit * 0.28, style: .continuous))
     }
 }
 
 struct BatteryTrayButton: View {
     let status: BatteryMonitor.Status
-    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
     private var helpText: String {
@@ -82,14 +142,13 @@ struct BatteryTrayButton: View {
                 NSWorkspace.shared.open(url)
             }
         } label: {
-            Image(systemName: symbolName)
-                .font(.system(size: size.traySymbol, weight: .medium))
-                .foregroundStyle(status.percentage ?? 100 <= 15 && !status.isCharging ? Color.red.opacity(0.95) : Color.primary.opacity(0.85))
-                .frame(width: size.trayHit, height: size.trayHit)
-                .background(
-                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
-                        .fill(hovering ? TaskbarTheme.hover : Color.clear)
-                )
+            TraySymbol(
+                name: symbolName,
+                color: status.percentage ?? 100 <= 15 && !status.isCharging
+                    ? Color.red.opacity(0.92)
+                    : Color.primary.opacity(0.84),
+                isHighlighted: hovering
+            )
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.92))
         .onHover { hovering in
@@ -101,87 +160,9 @@ struct BatteryTrayButton: View {
     }
 }
 
-/// Boost mark — a lightning bolt (Sowilo) drawn in the same stroke style as
-/// the Bluetooth rune so the two tray icons read as one family.
-private enum BoostTrayIcon {
-    private static var cached: NSImage?
-
-    static func image() -> NSImage {
-        if let cached { return cached }
-        let image = draw()
-        cached = image
-        return image
-    }
-
-    private static func draw() -> NSImage {
-        let side: CGFloat = 16
-        let scale: CGFloat = 4
-        let pixels = Int(side * scale)
-        let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixels,
-            pixelsHigh: pixels,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        )!
-        rep.size = NSSize(width: side, height: side)
-
-        NSGraphicsContext.saveGraphicsState()
-        if let context = NSGraphicsContext(bitmapImageRep: rep) {
-            NSGraphicsContext.current = context
-            context.imageInterpolation = .high
-            context.shouldAntialias = true
-            drawBolt(in: NSRect(x: 0, y: 0, width: side, height: side))
-        }
-        NSGraphicsContext.restoreGraphicsState()
-
-        let image = NSImage(size: NSSize(width: side, height: side))
-        image.addRepresentation(rep)
-        image.isTemplate = true
-        return image
-    }
-
-    private static func drawBolt(in rect: NSRect) {
-        let cx = rect.midX
-        let cy = rect.midY
-        let s = min(rect.width, rect.height) * 0.88
-
-        func pt(_ dx: CGFloat, _ dy: CGFloat) -> NSPoint {
-            NSPoint(x: cx + dx * s, y: cy + dy * s)
-        }
-
-        let bolt = NSBezierPath()
-        bolt.lineCapStyle = .round
-        bolt.lineJoinStyle = .round
-        bolt.lineWidth = rect.width * 0.11
-
-        // Symmetric lightning outline, clockwise from the top tip.
-        bolt.move(to: pt(0, 0.48))
-        bolt.line(to: pt(0.30, 0.08))
-        bolt.line(to: pt(0.10, 0.08))
-        bolt.line(to: pt(0.10, -0.08))
-        bolt.line(to: pt(0.30, -0.08))
-        bolt.line(to: pt(0, -0.48))
-        bolt.line(to: pt(-0.30, -0.08))
-        bolt.line(to: pt(-0.10, -0.08))
-        bolt.line(to: pt(-0.10, 0.08))
-        bolt.line(to: pt(-0.30, 0.08))
-        bolt.close()
-
-        NSColor.black.setStroke()
-        bolt.stroke()
-    }
-}
-
 struct BoostTrayButton: View {
     @ObservedObject var boost: BoostService
     @Environment(\.taskbarAccent) private var accent
-    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
     @State private var showingFlyout = false
     @State private var justCleaned = false
@@ -205,19 +186,12 @@ struct BoostTrayButton: View {
             NSApp.activate(ignoringOtherApps: true)
             showingFlyout.toggle()
         } label: {
-            Image(nsImage: BoostTrayIcon.image())
-                .renderingMode(.template)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: size.traySymbol + 3, height: size.traySymbol + 3)
-                .foregroundStyle(iconColor)
-                .frame(width: size.trayHit, height: size.trayHit)
-                .background(
-                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
-                        .fill(showingFlyout || hovering ? TaskbarTheme.hover : Color.clear)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: size.corner, style: .continuous))
+            TraySymbol(
+                name: boost.pressure.isHigh ? "bolt.fill" : "bolt",
+                color: iconColor,
+                isHighlighted: showingFlyout || hovering,
+                weight: .medium
+            )
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.92))
         .onHover { hovering in
@@ -501,21 +475,16 @@ struct SpacesTrayButton: View {
     let space: Int
     let count: Int
     let action: () -> Void
-    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Text("\(space)")
-                .font(.system(size: size.trayFont, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.primary.opacity(0.9))
-                .frame(minWidth: size.trayHit - 4, minHeight: size.trayHit - 4)
-                .padding(.horizontal, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
-                        .fill(hovering ? Color.primary.opacity(0.16) : Color.primary.opacity(0.10))
-                )
+            TraySymbol(
+                name: "\(max(0, min(space, 50))).square",
+                color: Color.primary.opacity(0.86),
+                isHighlighted: hovering,
+                weight: .medium
+            )
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.92))
         .onHover { hovering in
@@ -529,7 +498,6 @@ struct SpacesTrayButton: View {
 
 struct BluetoothTrayButton: View {
     @ObservedObject var bluetooth: BluetoothMonitor
-    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
     @State private var showingFlyout = false
 
@@ -543,28 +511,10 @@ struct BluetoothTrayButton: View {
             NSApp.activate(ignoringOtherApps: true)
             showingFlyout.toggle()
         } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(nsImage: BluetoothTrayIcon.image(isOn: bluetooth.isPoweredOn))
-                    .renderingMode(.template)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: size.traySymbol + 3, height: size.traySymbol + 3)
-                    .foregroundStyle(bluetooth.isPoweredOn ? Color.primary.opacity(0.92) : Color.primary.opacity(0.38))
-
-                if bluetooth.isPoweredOn, bluetooth.connectedCount > 0 {
-                    Circle()
-                        .fill(Color.green.opacity(0.95))
-                        .frame(width: max(4, size.traySymbol * 0.38), height: max(4, size.traySymbol * 0.38))
-                        .offset(x: 5, y: -4)
-                }
-            }
-            .frame(width: size.trayHit, height: size.trayHit)
-            .background(
-                RoundedRectangle(cornerRadius: size.corner, style: .continuous)
-                    .fill(showingFlyout || hovering ? TaskbarTheme.hover : Color.clear)
+            TrayBluetoothSymbol(
+                isPoweredOn: bluetooth.isPoweredOn,
+                isHighlighted: showingFlyout || hovering
             )
-            .contentShape(RoundedRectangle(cornerRadius: size.corner, style: .continuous))
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.92))
         .onHover { hovering in
@@ -582,122 +532,6 @@ struct BluetoothTrayButton: View {
             }
             Button("蓝牙设置", action: bluetooth.openBluetoothSettings)
         }
-    }
-}
-
-/// Bluetooth bind-rune (Hagall + Bjarkan). On is a solid mark; off is the
-/// same rune with an SF-style slash cut through it.
-private enum BluetoothTrayIcon {
-    private static var onImage: NSImage?
-    private static var offImage: NSImage?
-
-    static func image(isOn: Bool) -> NSImage {
-        if isOn {
-            if let onImage { return onImage }
-            let image = draw(isOn: true)
-            onImage = image
-            return image
-        }
-        if let offImage { return offImage }
-        let image = draw(isOn: false)
-        offImage = image
-        return image
-    }
-
-    private static func draw(isOn: Bool) -> NSImage {
-        let side: CGFloat = 16
-        let scale: CGFloat = 2
-        let pixels = Int(side * scale)
-        let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixels,
-            pixelsHigh: pixels,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        )!
-        rep.size = NSSize(width: side, height: side)
-
-        NSGraphicsContext.saveGraphicsState()
-        if let context = NSGraphicsContext(bitmapImageRep: rep) {
-            NSGraphicsContext.current = context
-            context.imageInterpolation = .high
-            context.shouldAntialias = true
-            drawRune(in: NSRect(x: 0, y: 0, width: side, height: side), isOn: isOn)
-        }
-        NSGraphicsContext.restoreGraphicsState()
-
-        let image = NSImage(size: NSSize(width: side, height: side))
-        image.addRepresentation(rep)
-        image.isTemplate = true
-        return image
-    }
-
-    private static func drawRune(in rect: NSRect, isOn: Bool) {
-        let cx = rect.midX + rect.width * 0.02
-        let cy = rect.midY
-        let s = min(rect.width, rect.height) * 0.88
-
-        func pt(_ dx: CGFloat, _ dy: CGFloat) -> NSPoint {
-            NSPoint(x: cx + dx * s, y: cy + dy * s)
-        }
-
-        let top = pt(0, 0.46)
-        let mid = pt(0, 0)
-        let bottom = pt(0, -0.46)
-        let upperRight = pt(0.36, 0.23)
-        let lowerRight = pt(0.36, -0.23)
-        let upperLeft = pt(-0.30, 0.23)
-        let lowerLeft = pt(-0.30, -0.23)
-
-        let rune = NSBezierPath()
-        rune.lineCapStyle = .round
-        rune.lineJoinStyle = .round
-        rune.lineWidth = isOn ? rect.width * 0.12 : rect.width * 0.09
-
-        rune.move(to: top)
-        rune.line(to: bottom)
-
-        rune.move(to: top)
-        rune.line(to: upperRight)
-        rune.line(to: mid)
-
-        rune.move(to: bottom)
-        rune.line(to: lowerRight)
-        rune.line(to: mid)
-
-        rune.move(to: upperLeft)
-        rune.line(to: mid)
-        rune.move(to: lowerLeft)
-        rune.line(to: mid)
-
-        NSColor.black.setStroke()
-        rune.stroke()
-
-        guard !isOn, let context = NSGraphicsContext.current else { return }
-
-        let slashStart = pt(-0.42, -0.40)
-        let slashEnd = pt(0.42, 0.40)
-
-        context.compositingOperation = .destinationOut
-        let cut = NSBezierPath()
-        cut.lineCapStyle = .round
-        cut.lineWidth = rect.width * 0.18
-        cut.move(to: slashStart)
-        cut.line(to: slashEnd)
-        cut.stroke()
-
-        context.compositingOperation = .sourceOver
-        let slash = NSBezierPath()
-        slash.lineCapStyle = .round
-        slash.lineWidth = rect.width * 0.09
-        slash.move(to: slashStart)
-        slash.line(to: slashEnd)
-        slash.stroke()
     }
 }
 
@@ -764,7 +598,6 @@ struct BluetoothFlyout: View {
 
 struct VolumeTrayButton: View {
     @ObservedObject var volume: VolumeMonitor
-    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
     @State private var showingFlyout = false
     @State private var scrollMonitor: Any?
@@ -783,14 +616,11 @@ struct VolumeTrayButton: View {
             NSApp.activate(ignoringOtherApps: true)
             showingFlyout.toggle()
         } label: {
-            Image(systemName: symbolName)
-                .font(.system(size: size.traySymbol, weight: .medium))
-                .foregroundStyle(volume.isMuted ? Color.primary.opacity(0.45) : Color.primary.opacity(0.85))
-                .frame(width: size.trayHit, height: size.trayHit)
-                .background(
-                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
-                        .fill(showingFlyout || hovering ? TaskbarTheme.hover : Color.clear)
-                )
+            TraySymbol(
+                name: symbolName,
+                color: volume.isMuted ? Color.primary.opacity(0.38) : Color.primary.opacity(0.84),
+                isHighlighted: showingFlyout || hovering
+            )
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.92))
         .onHover { hovering in
@@ -892,7 +722,7 @@ struct ClockTrayView: View {
                 .padding(.horizontal, 6)
                 .frame(height: size.trayHit)
                 .background(
-                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
+                    RoundedRectangle(cornerRadius: size.trayHit * 0.28, style: .continuous)
                         .fill(isOpen || hovering ? TaskbarTheme.hover : Color.clear)
                 )
         }
@@ -909,20 +739,15 @@ struct ClockTrayView: View {
 
 struct ShowDesktopTrayButton: View {
     let action: () -> Void
-    @Environment(\.taskbarSize) private var size
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Capsule()
-                .fill(hovering ? Color.primary.opacity(0.42) : Color.primary.opacity(0.26))
-                .frame(width: 4, height: size.trayHit * 0.66)
-                .frame(width: size.trayHit * 0.72, height: size.trayHit)
-                .contentShape(Rectangle())
-                .background(
-                    RoundedRectangle(cornerRadius: size.corner, style: .continuous)
-                        .fill(hovering ? TaskbarTheme.hover : Color.clear)
-                )
+            TraySymbol(
+                name: "macwindow",
+                color: Color.primary.opacity(0.62),
+                isHighlighted: hovering
+            )
         }
         .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
         .onHover { hovering in

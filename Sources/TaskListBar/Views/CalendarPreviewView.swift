@@ -40,19 +40,20 @@ struct CalendarPreviewView: View {
     private let todayInk = Color(red: 0.10, green: 0.34, blue: 0.68)
 
     enum Metrics {
-        static let width: CGFloat = 448
-        static let weatherWidth: CGFloat = 148
+        static let width: CGFloat = 520
+        static let sidebarWidth: CGFloat = 154
         static let weekHeight: CGFloat = 154
-        static let monthHeight: CGFloat = 424
+        static let monthHeight: CGFloat = 392
         static let agendaHeight: CGFloat = 240
-        static let agendaPopupWidth: CGFloat = 400
+        static let agendaPopupWidth: CGFloat = 448
         static let height: CGFloat = monthHeight
         static let corner: CGFloat = 18
         static let padX: CGFloat = 10
-        static let dayCell: CGFloat = 48
-        static let todayRing: CGFloat = 22
+        static let dayCell: CGFloat = 47
+        static let fiveWeekDayCell: CGFloat = 58
+        static let todayRing: CGFloat = 26
         static let monthRows = 6
-        static let rowSpacing: CGFloat = 4
+        static let rowSpacing: CGFloat = 3
 
         static var weekGridHeight: CGFloat { dayCell }
         static var monthGridHeight: CGFloat {
@@ -77,12 +78,11 @@ struct CalendarPreviewView: View {
                 isActive: viewModel.isCalendarOpen
             )
 
-            VStack(spacing: 0) {
-                HStack(alignment: .top, spacing: 0) {
-                    hero
-                    forecastCard
-                }
+            HStack(alignment: .top, spacing: 10) {
+                hero
+                forecastCard
             }
+            .padding(10)
 
             if isAgendaExpanded {
                 Color.black.opacity(0.28)
@@ -170,54 +170,66 @@ struct CalendarPreviewView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 8) {
                 expandCornerButton
-                Text(weather.placeName ?? clock.weekdayText)
+                Text(clock.weekdayText)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("\(calendar.component(.day, from: clock.now))")
+                    .font(.system(size: 46, weight: .light, design: .rounded))
+                    .monospacedDigit()
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(calendar.component(.month, from: clock.now))月")
+                    Text("\(calendar.component(.year, from: clock.now))")
+                }
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.72))
+            }
+            .foregroundStyle(.white)
+            .padding(.top, 8)
+
             if weather.currentTemp != nil || todayForecast != nil {
-                HStack(alignment: .top, spacing: 1) {
-                    Text("\(heroTemp)")
-                        .font(.system(size: 44, weight: .ultraLight, design: .rounded))
-                        .monospacedDigit()
-                    Text("°")
-                        .font(.system(size: 22, weight: .ultraLight, design: .rounded))
-                        .padding(.top, 6)
+                HStack(spacing: 7) {
+                    weatherIcon(heroKind, night: isNight, size: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(heroTemp)° · \(heroKind.label)")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                        if let todayForecast {
+                            Text("\(todayForecast.high)° / \(todayForecast.low)°")
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.68))
+                                .monospacedDigit()
+                        }
+                    }
                 }
                 .foregroundStyle(.white)
-                .padding(.top, 6)
+                .padding(.top, 8)
+            }
 
-                HStack(spacing: 5) {
-                    weatherIcon(heroKind, night: isNight, size: 14)
-                    Text(heroKind.label)
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .foregroundStyle(.white)
-                .padding(.top, 2)
-
-                if let todayForecast {
-                    Text("最高 \(todayForecast.high)°  最低 \(todayForecast.low)°")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.95))
-                        .monospacedDigit()
-                        .padding(.top, 6)
-                }
-            } else {
-                Text(clock.dayText)
-                    .font(.system(size: 26, weight: .light, design: .rounded))
-                    .foregroundStyle(.white)
-                    .padding(.top, 8)
+            if isMonthExpanded {
+                sidebarDivider
+                    .padding(.vertical, 12)
+                todaySummary
+                Spacer(minLength: 12)
+                nextArrangement
+                Text("点击日期查看详情")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.48))
+                    .padding(.top, 10)
             }
         }
-        .frame(width: Metrics.weatherWidth, alignment: .topLeading)
+        .padding(12)
+        .frame(width: Metrics.sidebarWidth, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
-        .padding(.top, 10)
-        .padding(.leading, 10)
-        .padding(.trailing, 4)
-        .padding(.bottom, 12)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(heroKind.label) \(heroTemp)度")
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.075))
+        )
+        .accessibilityElement(children: .contain)
     }
 
     private var forecastCard: some View {
@@ -231,10 +243,93 @@ struct CalendarPreviewView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(cardFill)
         )
-        .padding(.top, 10)
-        .padding(.trailing, 10)
-        .padding(.bottom, 10)
-        .padding(.leading, 4)
+    }
+
+    private var sidebarDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.14))
+            .frame(height: 1)
+    }
+
+    private var todaySummary: some View {
+        let eventItems = store.items(on: clock.now).filter { $0.kind == .event }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 5) {
+                Image(systemName: "calendar")
+                Text("今日日程")
+                Spacer(minLength: 0)
+                if !eventItems.isEmpty {
+                    Text("\(eventItems.count)")
+                        .monospacedDigit()
+                }
+            }
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.72))
+
+            if store.permissionDenied || store.needsPermission {
+                Button {
+                    if store.needsPermission {
+                        store.requestAccessFromUser()
+                    } else {
+                        store.openPrivacySettings()
+                    }
+                } label: {
+                    Label("允许访问日历", systemImage: "lock.open")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            } else if eventItems.isEmpty {
+                Label("暂无日程", systemImage: "checkmark.circle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.68))
+            } else {
+                ForEach(Array(eventItems.prefix(2))) { item in
+                    HStack(alignment: .top, spacing: 6) {
+                        Circle()
+                            .fill(agendaColor(for: item))
+                            .frame(width: 5, height: 5)
+                            .padding(.top, 4)
+                        Text(item.title)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var nextArrangement: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label("本月安排", systemImage: "calendar.badge.clock")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.56))
+            if let arrangement = upcomingArrangement {
+                Text(arrangement.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(arrangement.kind == .rest ? restMint : Color.white)
+                    .lineLimit(1)
+                Text(arrangement.dateText)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .monospacedDigit()
+            } else {
+                Text("暂无调休安排")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+        }
+    }
+
+    private var upcomingArrangement: HolidaySpan? {
+        let today = calendar.startOfDay(for: clock.now)
+        let arrangements = store.monthArrangements(for: displayedMonth)
+        if calendar.isDate(displayedMonth, equalTo: today, toGranularity: .month) {
+            return arrangements.first { $0.end >= today }
+        }
+        return arrangements.first
     }
 
     private var agendaPopup: some View {
@@ -283,7 +378,8 @@ struct CalendarPreviewView: View {
             }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.top, 9)
+        .padding(.bottom, 7)
         .animation(TaskbarMotion.calendarPage, value: toolbarTitle)
     }
 
@@ -315,11 +411,11 @@ struct CalendarPreviewView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(index >= 5 ? weekendPink : Color.white)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 18)
+                    .frame(height: 22)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 2)
+        .padding(.horizontal, 6)
+        .padding(.bottom, 4)
     }
 
     private var dayGrid: some View {
@@ -328,8 +424,8 @@ struct CalendarPreviewView: View {
                 .id(pageToken)
                 .transition(TaskbarMotion.calendarPageTransition(forward: monthForward))
         }
-        .padding(.horizontal, 4)
-        .padding(.bottom, 2)
+        .padding(.horizontal, 5)
+        .padding(.bottom, 5)
         .clipped()
         .animation(TaskbarMotion.calendarPage, value: pageToken)
         .animation(TaskbarMotion.calendarExpand, value: isMonthExpanded)
@@ -338,21 +434,25 @@ struct CalendarPreviewView: View {
     private var calendarPage: some View {
         let days = monthDays(for: displayedMonth)
         let weekRow = focusedWeekRow(in: days)
+        let rowCount = isMonthExpanded ? monthRowCount(for: displayedMonth) : Metrics.monthRows
+        let rowHeight = isMonthExpanded && rowCount == 5 ? Metrics.fiveWeekDayCell : Metrics.dayCell
         let rowStride = Metrics.dayCell + Metrics.rowSpacing
         return VStack(spacing: Metrics.rowSpacing) {
-            ForEach(0..<Metrics.monthRows, id: \.self) { row in
+            ForEach(0..<rowCount, id: \.self) { row in
                 HStack(spacing: 0) {
                     ForEach(0..<7, id: \.self) { col in
                         let index = row * 7 + col
-                        dayCell(index < days.count ? days[index] : nil)
+                        dayCell(index < days.count ? days[index] : nil, height: rowHeight)
                     }
                 }
-                .frame(height: Metrics.dayCell)
+                .frame(height: rowHeight)
             }
         }
         .offset(y: isMonthExpanded ? 0 : -CGFloat(weekRow) * rowStride)
         .frame(
-            height: isMonthExpanded ? Metrics.monthGridHeight : Metrics.weekGridHeight,
+            height: isMonthExpanded
+                ? rowHeight * CGFloat(rowCount) + Metrics.rowSpacing * CGFloat(rowCount - 1)
+                : Metrics.weekGridHeight,
             alignment: .top
         )
         .clipped()
@@ -382,14 +482,14 @@ struct CalendarPreviewView: View {
         .help(isMonthExpanded ? "收起" : "展开")
     }
 
-    private func dayCell(_ day: Date?) -> some View {
+    private func dayCell(_ day: Date?, height: CGFloat) -> some View {
         Group {
             if let day {
                 let isCurrentMonth = calendar.isDate(day, equalTo: displayedMonth, toGranularity: .month)
                 if isMonthExpanded && !isCurrentMonth {
                     Color.clear
                         .frame(maxWidth: .infinity)
-                        .frame(height: Metrics.dayCell)
+                        .frame(height: height)
                 } else {
                     let isToday = calendar.isDateInToday(day)
                     let isSelected = calendar.isDate(day, inSameDayAs: selectedDay)
@@ -405,7 +505,7 @@ struct CalendarPreviewView: View {
                     } label: {
                         VStack(spacing: 3) {
                             Text("\(calendar.component(.day, from: day))")
-                                .font(.system(size: 12, weight: isToday || isSelected ? .bold : .regular, design: .rounded))
+                                .font(.system(size: 13, weight: isToday || isSelected ? .bold : .medium, design: .rounded))
                                 .monospacedDigit()
                                 .foregroundStyle(dayForeground(
                                     isToday: isToday,
@@ -443,9 +543,8 @@ struct CalendarPreviewView: View {
                                 hasEvents: hasEvents
                             )
                         }
-                        .padding(.top, 1)
                         .frame(maxWidth: .infinity)
-                        .frame(height: Metrics.dayCell, alignment: .top)
+                        .frame(height: height, alignment: .center)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -453,7 +552,7 @@ struct CalendarPreviewView: View {
             } else {
                 Color.clear
                     .frame(maxWidth: .infinity)
-                    .frame(height: Metrics.dayCell)
+                    .frame(height: height)
             }
         }
     }
@@ -686,6 +785,17 @@ struct CalendarPreviewView: View {
             return [startOfDay]
         }
         return (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: weekStart) }
+    }
+
+    private func monthRowCount(for month: Date) -> Int {
+        guard let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: month)),
+              let dayRange = calendar.range(of: .day, in: .month, for: monthStart)
+        else {
+            return Metrics.monthRows
+        }
+        let firstWeekday = calendar.component(.weekday, from: monthStart)
+        let mondayOffset = (firstWeekday + 5) % 7
+        return min(Metrics.monthRows, max(5, (mondayOffset + dayRange.count + 6) / 7))
     }
 
     private func monthDays(for month: Date) -> [Date?] {

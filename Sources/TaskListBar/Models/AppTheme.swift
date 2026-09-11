@@ -83,10 +83,10 @@ enum TaskbarSize: String, CaseIterable, Identifiable {
 
     var traySymbol: CGFloat {
         switch self {
-        case .compact: return 10
-        case .regular: return 12
-        case .large: return 14
-        case .extraLarge: return 17
+        case .compact: return 11
+        case .regular: return 13
+        case .large: return 15
+        case .extraLarge: return 18
         }
     }
 
