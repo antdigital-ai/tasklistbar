@@ -20,6 +20,11 @@ let package = Package(
                 .linkedFramework("CoreLocation"),
                 .linkedFramework("EventKit")
             ]
+        ),
+        .testTarget(
+            name: "KeelBarTests",
+            dependencies: ["KeelBar"],
+            path: "Tests/KeelBarTests"
         )
     ]
 )

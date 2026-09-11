@@ -119,8 +119,13 @@ final class AppMonitor: ObservableObject {
             return
         }
         if let running = resolvedRunning(for: item) {
+            AppLog.info(
+                "匹配运行进程 \(item.name) pid=\(running.processIdentifier) active=\(running.isActive) hidden=\(running.isHidden) policy=\(running.activationPolicy.rawValue)",
+                category: "apps"
+            )
             if let windowID = item.windowID {
                 if item.isActive {
+                    AppLog.info("最小化窗口 \(item.name) window=\(windowID)", category: "apps")
                     if !WindowRaiser.minimize(
                         pid: running.processIdentifier,
                         windowID: windowID,
@@ -140,8 +145,15 @@ final class AppMonitor: ObservableObject {
                 return
             }
             if item.isActive || running.isActive {
-                running.hide()
-                return
+                if running.isActive, AppActivation.hasOnScreenWindow(running) {
+                    AppLog.info("隐藏前台应用 \(item.name) pid=\(running.processIdentifier)", category: "apps")
+                    running.hide()
+                    return
+                }
+                AppLog.info(
+                    "忽略过期 active 状态并重新激活 \(item.name) pid=\(running.processIdentifier) itemActive=\(item.isActive) processActive=\(running.isActive)",
+                    category: "apps"
+                )
             }
             AppActivation.bringToFront(running)
             return
@@ -151,6 +163,7 @@ final class AppMonitor: ObservableObject {
             AppLog.warn("找不到 \(item.name) 的路径", category: "apps")
             return
         }
+        AppLog.info("启动未运行应用 \(item.name) path=\(url.path)", category: "apps")
         AppActivation.open(url: url)
     }
 
@@ -200,16 +213,6 @@ final class AppMonitor: ObservableObject {
 }
 
 enum AppActivation {
-    private static let genericSchemes: Set<String> = [
-        "http", "https", "file", "mailto", "ftp", "tel", "sms", "webcal", "afp", "smb", "cifs"
-    ]
-    private static let rejectedSchemeParts = [
-        "license", "oauth", "callback", "uninstall", "update", "auth", "prefs", "feed", "helper"
-    ]
-    private static let weakTokens: Set<String> = [
-        "com", "org", "net", "mac", "app", "ios", "osx", "www", "desktop", "exclusive", "work"
-    ]
-
     static func bringToFront(
         _ running: NSRunningApplication,
         allowOpenFallback: Bool = true,
@@ -218,6 +221,10 @@ enum AppActivation {
         axIndex: Int? = nil
     ) {
         guard !running.isTerminated else { return }
+        AppLog.info(
+            "开始激活 \(running.localizedName ?? "?") pid=\(running.processIdentifier) active=\(running.isActive) hidden=\(running.isHidden) policy=\(running.activationPolicy.rawValue) fallback=\(allowOpenFallback)",
+            category: "apps"
+        )
         running.unhide()
 
         if #available(macOS 14.0, *) {
@@ -231,32 +238,96 @@ enum AppActivation {
             raiseWindows(of: running)
         }
 
-        let needsURL = isAgentApp(running) || !running.isActive
-        if needsURL, let url = customActivationURL(for: running) {
-            NSWorkspace.shared.open(url)
+        if isAgentApp(running), openCustomActivationURL(for: running) {
+            AppLog.info("Agent 应用改用协议激活 \(running.localizedName ?? "?")", category: "apps")
             return
         }
 
-        if running.isActive {
+        let immediatelyVisible = hasOnScreenWindow(running)
+        if running.isActive, immediatelyVisible {
+            AppLog.info("原生激活立即成功且窗口可见 \(running.localizedName ?? "?")", category: "apps")
             return
         }
 
-        guard allowOpenFallback, let url = running.bundleURL else { return }
-        open(url: url)
+        // Activation is asynchronous on recent macOS releases. Waiting briefly avoids
+        // invoking an app's deep-link protocol during an otherwise normal launch.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !running.isTerminated else {
+                AppLog.warn("激活期间进程已退出 pid=\(running.processIdentifier)", category: "apps")
+                return
+            }
+            let visible = hasOnScreenWindow(running)
+            if running.isActive, visible {
+                AppLog.info("原生激活延迟成功且窗口可见 \(running.localizedName ?? "?") pid=\(running.processIdentifier)", category: "apps")
+                return
+            }
+            AppLog.warn(
+                "原生 activate 未显示窗口 \(running.localizedName ?? "?") pid=\(running.processIdentifier) active=\(running.isActive) visible=\(visible)",
+                category: "apps"
+            )
+
+            // Re-opening the exact bundle is the closest NSWorkspace equivalent of
+            // `open -a /path/App.app` and is more reliable than a bare deep link.
+            if allowOpenFallback, let url = running.bundleURL {
+                AppLog.info("尝试按路径重新打开 \(running.localizedName ?? "?") path=\(url.path)", category: "apps")
+                open(url: url)
+                return
+            }
+            if !openCustomActivationURL(for: running) {
+                AppLog.warn("没有可用协议兜底 \(running.localizedName ?? "?")", category: "apps")
+            }
+        }
     }
 
     static func open(url: URL) {
+        AppLog.info("请求 NSWorkspace 打开 path=\(url.path)", category: "apps")
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: config) { running, error in
             if let error {
-                AppLog.warn("打开失败 \(url.lastPathComponent): \(error.localizedDescription)", category: "apps")
+                AppLog.warn("NSWorkspace 打开失败 \(url.lastPathComponent): \(error.localizedDescription)", category: "apps")
+                if !openCustomActivationURL(forBundleAt: url) {
+                    AppLog.warn("没有协议可继续尝试 \(url.lastPathComponent)", category: "apps")
+                }
                 return
             }
-            guard let running else { return }
+            guard let running else {
+                AppLog.warn("NSWorkspace 未返回运行进程 \(url.lastPathComponent)", category: "apps")
+                if !openCustomActivationURL(forBundleAt: url) {
+                    AppLog.warn("没有协议可继续尝试 \(url.lastPathComponent)", category: "apps")
+                }
+                return
+            }
+            AppLog.info(
+                "NSWorkspace 打开完成 \(url.lastPathComponent) pid=\(running.processIdentifier) active=\(running.isActive) finished=\(running.isFinishedLaunching)",
+                category: "apps"
+            )
             Task { @MainActor in
                 bringToFront(running, allowOpenFallback: false)
             }
+        }
+    }
+
+    /// `NSRunningApplication.isActive` can become true while an app's window remains
+    /// on another Space. Treat activation as successful only when a real window is
+    /// visible on the current Space.
+    static func hasOnScreenWindow(_ running: NSRunningApplication) -> Bool {
+        guard let infoList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+
+        return infoList.contains { info in
+            guard (info[kCGWindowOwnerPID as String] as? pid_t) == running.processIdentifier else { return false }
+            let layer = info[kCGWindowLayer as String] as? Int ?? 0
+            guard layer == 0 else { return false }
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            guard alpha > 0.05 else { return false }
+            guard let raw = info[kCGWindowBounds as String] as? [String: Any] else { return false }
+            let width = (raw["Width"] as? NSNumber)?.doubleValue ?? 0
+            let height = (raw["Height"] as? NSNumber)?.doubleValue ?? 0
+            return width >= 80 && height >= 80
         }
     }
 
@@ -286,54 +357,87 @@ enum AppActivation {
         return false
     }
 
-    private static func customActivationURL(for running: NSRunningApplication) -> URL? {
-        guard let bundleURL = running.bundleURL,
-              let bundle = Bundle(url: bundleURL),
-              let types = bundle.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]]
-        else { return nil }
-
-        let schemes = types
-            .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
-            .map { $0.lowercased() }
-            .filter { isActivationScheme($0) }
-        guard !schemes.isEmpty else { return nil }
-
-        let tokens = identityTokens(for: running, bundle: bundle)
-        let ranked = schemes.map { ($0, score(scheme: $0, tokens: tokens)) }
-        guard let best = ranked.max(by: { $0.1 < $1.1 }), best.1 >= 3 else { return nil }
-        return URL(string: "\(best.0):")
+    @discardableResult
+    private static func openCustomActivationURL(for running: NSRunningApplication) -> Bool {
+        guard let bundleURL = running.bundleURL else { return false }
+        return openCustomActivationURL(
+            forBundleAt: bundleURL,
+            bundleIdentifier: running.bundleIdentifier,
+            localizedName: running.localizedName
+        )
     }
 
-    private static func isActivationScheme(_ scheme: String) -> Bool {
-        guard !scheme.isEmpty, !genericSchemes.contains(scheme) else { return false }
-        return !rejectedSchemeParts.contains { scheme.contains($0) }
+    @discardableResult
+    private static func openCustomActivationURL(forBundleAt bundleURL: URL) -> Bool {
+        openCustomActivationURL(forBundleAt: bundleURL, bundleIdentifier: nil, localizedName: nil)
     }
 
-    private static func identityTokens(for running: NSRunningApplication, bundle: Bundle) -> Set<String> {
-        var raw: [String] = []
-        if let bid = running.bundleIdentifier { raw.append(bid) }
-        if let name = running.localizedName { raw.append(name) }
-        if let name = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String { raw.append(name) }
-        if let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String { raw.append(name) }
-        if let name = bundle.object(forInfoDictionaryKey: "CFBundleExecutable") as? String { raw.append(name) }
+    @discardableResult
+    private static func openCustomActivationURL(
+        forBundleAt bundleURL: URL,
+        bundleIdentifier: String?,
+        localizedName: String?
+    ) -> Bool {
+        guard let bundle = Bundle(url: bundleURL), let info = bundle.infoDictionary else { return false }
+        let schemes = ActivationSchemeResolver.candidates(
+            infoDictionary: info,
+            bundleIdentifier: bundleIdentifier ?? bundle.bundleIdentifier,
+            localizedName: localizedName
+        )
+        guard !schemes.isEmpty else {
+            AppLog.info("未找到安全的唤醒协议 \(bundleURL.lastPathComponent)", category: "apps")
+            return false
+        }
+        AppLog.info("协议候选 \(bundleURL.lastPathComponent): \(schemes.joined(separator: ","))", category: "apps")
 
-        var tokens = Set<String>()
-        for value in raw {
-            let lower = value.lowercased()
-            for piece in lower.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
-                let token = String(piece)
-                guard token.count >= 4, !weakTokens.contains(token) else { continue }
-                tokens.insert(token)
+        openActivationCandidate(schemes, at: 0, forBundleAt: bundleURL)
+        return true
+    }
+
+    private static func openActivationCandidate(_ schemes: [String], at index: Int, forBundleAt bundleURL: URL) {
+        guard schemes.indices.contains(index), let activationURL = URL(string: "\(schemes[index]):") else {
+            AppLog.warn("所有协议均无法唤醒 \(bundleURL.lastPathComponent)", category: "apps")
+            return
+        }
+        let scheme = schemes[index]
+
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        config.addsToRecentItems = false
+        NSWorkspace.shared.open(
+            [activationURL],
+            withApplicationAt: bundleURL,
+            configuration: config
+        ) { launched, error in
+            if let error {
+                AppLog.warn("协议唤醒失败 \(bundleURL.lastPathComponent) [\(scheme)]: \(error.localizedDescription)", category: "apps")
+                openActivationCandidate(schemes, at: index + 1, forBundleAt: bundleURL)
+                return
+            }
+            guard let launched else {
+                AppLog.warn("协议已投递但未返回进程 \(bundleURL.lastPathComponent) [\(scheme)]", category: "apps")
+                return
+            }
+            AppLog.info(
+                "协议投递完成 \(bundleURL.lastPathComponent) [\(scheme)] pid=\(launched.processIdentifier) active=\(launched.isActive)",
+                category: "apps"
+            )
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                launched.unhide()
+                if #available(macOS 14.0, *) {
+                    NSApp.yieldActivation(to: launched)
+                    _ = launched.activate()
+                }
+                launched.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
+                raiseWindows(of: launched)
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                AppLog.info(
+                    "协议激活结果 \(bundleURL.lastPathComponent) [\(scheme)] active=\(launched.isActive) hidden=\(launched.isHidden)",
+                    category: "apps"
+                )
             }
         }
-        return tokens
-    }
-
-    private static func score(scheme: String, tokens: Set<String>) -> Int {
-        let compact = scheme.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined()
-        if tokens.contains(scheme) || tokens.contains(compact) { return 3 }
-        if tokens.contains(where: { $0.count >= 4 && (scheme == $0 || compact == $0) }) { return 3 }
-        if tokens.contains(where: { $0.count >= 4 && (scheme.contains($0) || $0.contains(scheme)) }) { return 2 }
-        return 1
+        AppLog.info("使用协议唤醒 \(bundleURL.lastPathComponent) [\(scheme)]", category: "apps")
     }
 }

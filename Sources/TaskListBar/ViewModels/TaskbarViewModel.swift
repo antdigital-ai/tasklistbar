@@ -379,6 +379,10 @@ final class TaskbarViewModel: ObservableObject {
     }
 
     func select(_ item: TaskbarAppItem) {
+        AppLog.info(
+            "点击 \(item.name) bid=\(item.bundleIdentifier) running=\(item.isRunning) active=\(item.isActive) grouped=\(item.isGrouped) windows=\(item.windowCount) pid=\(item.processIdentifier.map(String.init) ?? "nil")",
+            category: "apps"
+        )
         if item.isFolder {
             closeOverlays()
             if let pin = pinnedStore.item(id: item.id) {
