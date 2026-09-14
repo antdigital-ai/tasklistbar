@@ -14,6 +14,8 @@ final class VolumeMonitor: ObservableObject {
 
     private var deviceID: AudioDeviceID = 0
     private var listeners: [Listener] = []
+    private var isBinding = false
+    private var rebindTask: Task<Void, Never>?
 
     private struct Listener {
         let object: AudioObjectID
@@ -22,16 +24,18 @@ final class VolumeMonitor: ObservableObject {
     }
 
     func start() {
-        refreshDevice()
+        bindDevice(force: true)
     }
 
     func stop() {
+        rebindTask?.cancel()
+        rebindTask = nil
         removeListeners()
     }
 
     func setLevel(_ value: Double) {
         let clamped = min(max(value, 0), 1)
-        guard let device = resolvedDevice() else { return }
+        guard let device = activeDevice() else { return }
         level = clamped
         if clamped > 0.001, isMuted {
             writeMute(false, device: device)
@@ -45,7 +49,7 @@ final class VolumeMonitor: ObservableObject {
     }
 
     func toggleMute() {
-        guard let device = resolvedDevice() else { return }
+        guard let device = activeDevice() else { return }
         let next = !isMuted
         writeMute(next, device: device)
         isMuted = next
@@ -65,32 +69,45 @@ final class VolumeMonitor: ObservableObject {
     }
 
     func refresh() {
-        guard let device = resolvedDevice() else { return }
+        applyReadings()
+    }
+
+    private func activeDevice() -> AudioDeviceID? {
+        deviceID == 0 ? nil : deviceID
+    }
+
+    private func scheduleRebind() {
+        rebindTask?.cancel()
+        rebindTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled else { return }
+            self?.bindDevice()
+        }
+    }
+
+    private func bindDevice(force: Bool = false) {
+        guard !isBinding else { return }
+        let current = readDefaultOutputDevice()
+        guard current != 0 else { return }
+        if !force, current == deviceID { return }
+
+        isBinding = true
+        removeListeners()
+        deviceID = current
+        listenForDefaultDeviceChanges()
+        listenOnDevice()
+        applyReadings()
+        isBinding = false
+    }
+
+    private func applyReadings() {
+        guard let device = activeDevice() else { return }
         let nextLevel = Double(readVolume(device: device))
         let nextMuted = readMute(device: device)
         let nextName = readName(device: device) ?? "扬声器"
         if abs(nextLevel - level) > 0.004 { level = nextLevel }
         if nextMuted != isMuted { isMuted = nextMuted }
         if nextName != outputName { outputName = nextName }
-    }
-
-    private func refreshDevice() {
-        removeListeners()
-        deviceID = readDefaultOutputDevice()
-        listenForDefaultDeviceChanges()
-        listenOnDevice()
-        refresh()
-    }
-
-    private func resolvedDevice() -> AudioDeviceID? {
-        let current = readDefaultOutputDevice()
-        if current != 0, current != deviceID {
-            deviceID = current
-            removeListeners()
-            listenForDefaultDeviceChanges()
-            listenOnDevice()
-        }
-        return deviceID == 0 ? nil : deviceID
     }
 
     private func readDefaultOutputDevice() -> AudioDeviceID {
@@ -119,15 +136,30 @@ final class VolumeMonitor: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
         addListener(AudioObjectID(kAudioObjectSystemObject), &address) { [weak self] in
-            self?.refreshDevice()
+            self?.scheduleRebind()
         }
     }
 
     private func listenOnDevice() {
         guard deviceID != 0 else { return }
-        for var address in Self.volumeAddresses + Self.muteAddresses {
-            addListener(deviceID, &address) { [weak self] in self?.refresh() }
+        if let volume = firstExisting(Self.volumeAddresses, on: deviceID) {
+            var address = volume
+            addListener(deviceID, &address) { [weak self] in self?.applyReadings() }
         }
+        if let mute = firstExisting(Self.muteAddresses, on: deviceID) {
+            var address = mute
+            addListener(deviceID, &address) { [weak self] in self?.applyReadings() }
+        }
+    }
+
+    private func firstExisting(
+        _ addresses: [AudioObjectPropertyAddress],
+        on device: AudioDeviceID
+    ) -> AudioObjectPropertyAddress? {
+        for var address in addresses where AudioObjectHasProperty(device, &address) {
+            return address
+        }
+        return nil
     }
 
     private func addListener(
@@ -175,7 +207,6 @@ final class VolumeMonitor: ObservableObject {
         for var address in Self.volumeAddresses where isSettable(device, &address) {
             if setFloat(device, &address, scalar) {
                 wrote = true
-                // Virtual / main-element volume is the system control; stop after the first hit.
                 if address.mElement == kAudioObjectPropertyElementMain {
                     return true
                 }
@@ -247,9 +278,6 @@ final class VolumeMonitor: ObservableObject {
         return AudioObjectSetPropertyData(device, &address, 0, nil, size, &mutable) == noErr
     }
 
-    /// Built-in Mac speakers expose volume on output/main. Virtual volume is
-    /// the software control used by Bluetooth / HDMI devices. Stereo channels
-    /// are a last resort.
     private static let virtualMainVolume = AudioObjectPropertySelector(0x766D7663) // 'vmvc'
     private static let virtualMainMute = AudioObjectPropertySelector(0x766D6D63) // 'vmmc'
 
