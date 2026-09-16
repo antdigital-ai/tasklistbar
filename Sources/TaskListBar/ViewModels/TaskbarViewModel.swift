@@ -12,6 +12,8 @@ final class TaskbarViewModel: ObservableObject {
     @Published var isCalendarAgendaExpanded = false
     @Published var isSettingsOpen = false
     @Published var isPermissionsOpen = false
+    @Published var isBoostOpen = false
+    @Published var isWorktreeOpen = false
     @Published var isWindowListOpen = false
     @Published var windowListBundleID: String?
     @Published var windowListAppName = ""
@@ -469,6 +471,8 @@ final class TaskbarViewModel: ObservableObject {
         isCalendarOpen = false
         isSettingsOpen = false
         isPermissionsOpen = false
+        isBoostOpen = false
+        isWorktreeOpen = false
         closeWindowList()
         showsAllApps = false
         startMenuCatalog.selectedCategory = nil
@@ -506,6 +510,8 @@ final class TaskbarViewModel: ObservableObject {
         isModifierKeysOpen = false
         isSettingsOpen = false
         isPermissionsOpen = false
+        isBoostOpen = false
+        isWorktreeOpen = false
         closeWindowList()
         startMenuCatalog.selectedCategory = nil
         startMenuCatalog.searchText = ""
@@ -549,6 +555,8 @@ final class TaskbarViewModel: ObservableObject {
         isCalendarOpen = false
         isSettingsOpen = false
         isPermissionsOpen = false
+        isBoostOpen = false
+        isWorktreeOpen = false
         closeWindowList()
         startMenuCatalog.searchText = ""
         isModifierKeysOpen = true
@@ -565,6 +573,8 @@ final class TaskbarViewModel: ObservableObject {
         isCalendarOpen = false
         isModifierKeysOpen = false
         isPermissionsOpen = false
+        isBoostOpen = false
+        isWorktreeOpen = false
         closeWindowList()
         startMenuCatalog.searchText = ""
         isSettingsOpen = true
@@ -581,6 +591,8 @@ final class TaskbarViewModel: ObservableObject {
         isCalendarOpen = false
         isModifierKeysOpen = false
         isSettingsOpen = false
+        isBoostOpen = false
+        isWorktreeOpen = false
         closeWindowList()
         startMenuCatalog.searchText = ""
         permissionCenter.refresh()
@@ -604,6 +616,8 @@ final class TaskbarViewModel: ObservableObject {
         isCalendarOpen = false
         isSettingsOpen = false
         isPermissionsOpen = false
+        isBoostOpen = false
+        isWorktreeOpen = false
         isCalendarAgendaExpanded = false
         permissionCenter.setPageVisible(false)
         if includingWindowList {
@@ -616,7 +630,34 @@ final class TaskbarViewModel: ObservableObject {
     }
 
     var hasOpenOverlay: Bool {
-        isStartMenuOpen || isModifierKeysOpen || isCalendarOpen || isSettingsOpen || isPermissionsOpen || isCalendarAgendaExpanded || isWindowListOpen
+        isStartMenuOpen || isModifierKeysOpen || isCalendarOpen || isSettingsOpen || isPermissionsOpen || isBoostOpen || isWorktreeOpen || isCalendarAgendaExpanded || isWindowListOpen
+    }
+
+    func toggleBoostCleanup() {
+        if isBoostOpen {
+            isBoostOpen = false
+            return
+        }
+        closeOverlays()
+        isBoostOpen = true
+    }
+
+    func closeBoostCleanup() {
+        isBoostOpen = false
+    }
+
+    func toggleWorktreeCleanup() {
+        if isWorktreeOpen {
+            isWorktreeOpen = false
+            return
+        }
+        closeOverlays()
+        isWorktreeOpen = true
+        boostService.prefetchRecentRepos()
+    }
+
+    func closeWorktreeCleanup() {
+        isWorktreeOpen = false
     }
 
     func requestCalendarShift(_ delta: Int) {

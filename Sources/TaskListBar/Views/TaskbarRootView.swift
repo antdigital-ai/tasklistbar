@@ -75,7 +75,11 @@ struct TaskbarRootView: View {
                 volume: viewModel.volumeMonitor,
                 clock: viewModel.clockModel,
                 isCalendarOpen: viewModel.isCalendarOpen,
+                isBoostOpen: viewModel.isBoostOpen,
+                isWorktreeOpen: viewModel.isWorktreeOpen,
                 onToggleCalendar: { viewModel.toggleCalendarPreview() },
+                onToggleBoost: { viewModel.toggleBoostCleanup() },
+                onToggleWorktree: { viewModel.toggleWorktreeCleanup() },
                 onShowDesktop: { viewModel.toggleShowDesktop() }
             )
         }
@@ -455,6 +459,22 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> where C
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         super.hitTest(point) ?? self
+    }
+}
+
+enum SolidWindowFactory {
+    static func wrap<Content: View>(
+        _ rootView: Content,
+        cornerRadius: CGFloat
+    ) -> NSView {
+        let hosting = FirstMouseHostingView(rootView: rootView)
+        hosting.wantsLayer = true
+        hosting.layer?.isOpaque = true
+        hosting.layer?.backgroundColor = NSColor.white.cgColor
+        hosting.layer?.cornerRadius = cornerRadius
+        hosting.layer?.cornerCurve = .continuous
+        hosting.layer?.masksToBounds = true
+        return hosting
     }
 }
 

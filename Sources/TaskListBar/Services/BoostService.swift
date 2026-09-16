@@ -1,11 +1,19 @@
+import AppKit
 import Combine
 import Foundation
 
 /// 一键「加速」：强制关闭 AI 编码 agent 与开发 / 编译类进程，释放 CPU 与内存。
 @MainActor
 final class BoostService: ObservableObject {
+    enum CleanupKind: Equatable {
+        case idle
+        case boost
+        case worktree
+    }
+
     struct Snapshot: Equatable {
         var generation = 0
+        var kind: CleanupKind = .idle
         var killed = 0
         var reclaimedBytes: Int64 = 0
         var timestamp: Date?
@@ -25,7 +33,11 @@ final class BoostService: ObservableObject {
     @Published private(set) var pressure = Pressure()
     @Published private(set) var lastGroups: [ProcessGroup] = []
     @Published private(set) var lastDisks: [DiskItem] = []
+    @Published private(set) var lastWorktrees: [WorktreeItem] = []
+    @Published private(set) var lastRecentRepos: [RecentRepo] = []
     @Published private(set) var disksCached = false
+    @Published private(set) var worktreesCached = false
+    @Published private(set) var recentReposCached = false
 
     /// 一组可清理的进程，供选择面板展示。
     struct ProcessGroup: Identifiable, Equatable {
@@ -58,6 +70,48 @@ final class BoostService: ObservableObject {
         var id: String { kind.rawValue }
         var bytes: Int64 { entries.reduce(0) { $0 + $1.bytes } }
         var count: Int { entries.count }
+    }
+
+    /// 一棵可删除的关联 Worktree（不含主工作区）。
+    struct WorktreeItem: Identifiable, Equatable {
+        let url: URL
+        let name: String
+        let detail: String
+        let bytes: Int64
+        let isRecent: Bool
+
+        var id: String { url.path }
+        var selectedByDefault: Bool { !isRecent }
+    }
+
+    /// Cursor / ChatGPT / Claude Code 最近用过的 Git 主仓库。
+    struct RecentRepo: Identifiable, Equatable {
+        let url: URL
+        let name: String
+        let sources: [String]
+        let lastActive: Date
+        let worktreeCount: Int
+
+        var id: String { url.path }
+
+        var detail: String {
+            var parts = sources
+            parts.append(Self.relativeTime(lastActive))
+            if worktreeCount > 0 {
+                parts.append("\(worktreeCount) worktrees")
+            }
+            return parts.joined(separator: " · ")
+        }
+
+        private static func relativeTime(_ date: Date) -> String {
+            let seconds = Date().timeIntervalSince(date)
+            if seconds < 60 { return "Just now" }
+            if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+            if seconds < 86_400 { return "\(Int(seconds / 3600))h ago" }
+            if seconds < 172_800 { return "Yesterday" }
+            if seconds < 864_000 { return "\(Int(seconds / 86_400))d ago" }
+            return "\(Int(seconds / 604_800))w ago"
+        }
     }
 
     private struct Target {
@@ -141,6 +195,9 @@ final class BoostService: ObservableObject {
     private var pressureTimer: DispatchSourceTimer?
     private var groupsCachedAt = Date.distantPast
     private var disksCachedAt = Date.distantPast
+    private var worktreesCachedAt = Date.distantPast
+    private var worktreesCachedRepo: String?
+    private var recentReposCachedAt = Date.distantPast
 
     private struct ProcessRow {
         let pid: String
@@ -212,6 +269,7 @@ final class BoostService: ObservableObject {
 
     func start() {
         samplePressure()
+        prefetchRecentRepos()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(12))
         timer.setEventHandler { [weak self] in
@@ -219,6 +277,10 @@ final class BoostService: ObservableObject {
         }
         timer.resume()
         pressureTimer = timer
+    }
+
+    func prefetchRecentRepos() {
+        Task { await scanRecentRepos(force: false) }
     }
 
     func stop() {
@@ -243,14 +305,14 @@ final class BoostService: ObservableObject {
         }
     }
 
-    /// 扫描可回收的 worktree 与 Node 依赖。
+    /// 扫描可回收的 Node 包管理器缓存。
     func scanDisk(force: Bool = false) async -> [DiskItem] {
         if !force, Date().timeIntervalSince(disksCachedAt) < Self.diskTTL, disksCached {
             return lastDisks
         }
         return await withCheckedContinuation { continuation in
             queue.async {
-                let disks = Self.scanDiskSync()
+                let disks = Self.scanNodeCaches()
                 Task { @MainActor in
                     self.lastDisks = disks
                     self.disksCachedAt = Date()
@@ -261,7 +323,76 @@ final class BoostService: ObservableObject {
         }
     }
 
-    /// 关闭选中进程，并删除选中的 worktree / Node 依赖。
+    /// 扫描可删除的关联 Worktree。`repoPath` 为空时扫 Cursor / Codex / Claude 目录。
+    func scanWorktrees(repoPath: String?, force: Bool = false) async -> [WorktreeItem] {
+        if !force,
+           Date().timeIntervalSince(worktreesCachedAt) < Self.diskTTL,
+           worktreesCached,
+           worktreesCachedRepo == repoPath {
+            return lastWorktrees
+        }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let items = Self.scanWorktreesSync(repoPath: repoPath)
+                Task { @MainActor in
+                    self.lastWorktrees = items
+                    self.worktreesCachedAt = Date()
+                    self.worktreesCachedRepo = repoPath
+                    self.worktreesCached = true
+                    continuation.resume(returning: items)
+                }
+            }
+        }
+    }
+
+    func scanRecentRepos(force: Bool = false) async -> [RecentRepo] {
+        if !force, Date().timeIntervalSince(recentReposCachedAt) < 30, recentReposCached {
+            return lastRecentRepos
+        }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                let items = Self.scanRecentReposSync()
+                Task { @MainActor in
+                    self.lastRecentRepos = items
+                    self.recentReposCachedAt = Date()
+                    self.recentReposCached = true
+                    AppLog.info("最近 Git 项目 \(items.count) 个", category: "boost")
+                    continuation.resume(returning: items)
+                }
+            }
+        }
+    }
+
+    func reveal(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func cleanWorktrees(_ items: [WorktreeItem]) {
+        guard !isRunning else { return }
+        isRunning = true
+        queue.async {
+            let reclaimed = Self.reclaimWorktreesSync(items.map(\.url))
+            let message = Self.cleanupMessage(killed: 0, bytes: reclaimed, hadSelection: !items.isEmpty)
+            RuntimeCache.shared.reset()
+            Task { @MainActor in
+                var snap = self.snapshot
+                snap.generation += 1
+                snap.kind = .worktree
+                snap.killed = 0
+                snap.reclaimedBytes = reclaimed
+                snap.timestamp = Date()
+                snap.message = message
+                self.snapshot = snap
+                self.isRunning = false
+                self.lastWorktrees = []
+                self.worktreesCached = false
+                self.worktreesCachedAt = .distantPast
+                AppLog.info("Worktree 清理：\(message)", category: "boost")
+            }
+        }
+    }
+
+    /// 关闭选中进程，并删除选中的 Node 缓存。
     func boost(groups: [ProcessGroup], disks: [DiskItem] = []) {
         guard !isRunning else { return }
         isRunning = true
@@ -278,6 +409,7 @@ final class BoostService: ObservableObject {
             Task { @MainActor in
                 var snap = self.snapshot
                 snap.generation += 1
+                snap.kind = .boost
                 snap.killed = killed
                 snap.reclaimedBytes = reclaimed
                 snap.timestamp = Date()
@@ -293,6 +425,33 @@ final class BoostService: ObservableObject {
                 self.samplePressure()
             }
         }
+    }
+
+    nonisolated static func resolvedGitRepo(at url: URL) -> URL? {
+        resolvedMainRepo(at: url)
+    }
+
+    private nonisolated static func resolvedMainRepo(at url: URL) -> URL? {
+        let top = run("/usr/bin/git", arguments: ["-C", url.path, "rev-parse", "--show-toplevel"]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !top.isEmpty, FileManager.default.fileExists(atPath: top) else { return nil }
+        let common = run("/usr/bin/git", arguments: ["-C", url.path, "rev-parse", "--git-common-dir"]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !common.isEmpty else {
+            return URL(fileURLWithPath: top, isDirectory: true).standardizedFileURL
+        }
+        var gitdir = URL(fileURLWithPath: common, relativeTo: url).standardizedFileURL
+        if gitdir.lastPathComponent.isEmpty { gitdir.deleteLastPathComponent() }
+        if gitdir.lastPathComponent != ".git" {
+            gitdir.deleteLastPathComponent()
+            if gitdir.lastPathComponent == "worktrees" {
+                gitdir.deleteLastPathComponent()
+            }
+        }
+        if gitdir.lastPathComponent == ".git" {
+            gitdir.deleteLastPathComponent()
+        }
+        return FileManager.default.fileExists(atPath: gitdir.path) ? gitdir : URL(fileURLWithPath: top, isDirectory: true).standardizedFileURL
     }
 
     nonisolated static func formatBytes(_ bytes: Int64) -> String {
@@ -438,61 +597,196 @@ final class BoostService: ObservableObject {
         "Library/Caches/node-gyp"
     ]
 
-    private nonisolated static func scanDiskSync() -> [DiskItem] {
-        let roots = worktreeRoots()
-        let worktrees = discoverWorktrees(in: roots)
-        let stale = worktrees.filter { !$0.isRecent }
-        let recent = worktrees.filter(\.isRecent)
-        var items: [DiskItem] = []
-
-        if let item = makeWorktreeItem(
-            kind: .staleWorktrees,
-            label: "过期 Worktree",
-            records: stale,
-            selectedByDefault: true
-        ) {
-            items.append(item)
-        }
-        if let item = makeWorktreeItem(
-            kind: .recentWorktrees,
-            label: "最近 Worktree",
-            records: recent,
-            selectedByDefault: false
-        ) {
-            items.append(item)
-        }
-        if let item = makeNodeDependencyItem(worktrees: worktrees) {
-            items.append(item)
-        }
-        return items
+    private nonisolated static func scanNodeCaches() -> [DiskItem] {
+        guard let item = makeNodeDependencyItem() else { return [] }
+        return [item]
     }
 
-    private nonisolated static func makeWorktreeItem(
-        kind: DiskItem.Kind,
-        label: String,
-        records: [WorktreeRecord],
-        selectedByDefault: Bool
-    ) -> DiskItem? {
-        guard !records.isEmpty else { return nil }
-        let entries = records.map {
-            DiskItem.Entry(url: $0.url, bytes: $0.bytes, source: $0.name)
+    private struct RecentHit {
+        let url: URL
+        let source: String
+        let at: Date
+    }
+
+    private nonisolated static func scanRecentReposSync() -> [RecentRepo] {
+        var hits: [RecentHit] = []
+        hits.append(contentsOf: cursorRecentHits())
+        hits.append(contentsOf: claudeRecentHits())
+        hits.append(contentsOf: codexRecentHits())
+
+        var merged: [String: (url: URL, sources: Set<String>, at: Date)] = [:]
+        for hit in hits {
+            guard let repo = resolvedMainRepo(at: hit.url) else { continue }
+            let key = repo.path
+            if var current = merged[key] {
+                current.sources.insert(hit.source)
+                current.at = max(current.at, hit.at)
+                merged[key] = current
+            } else {
+                merged[key] = (repo, [hit.source], hit.at)
+            }
         }
-        let detail: String
-        if records.count == 1 {
-            detail = records[0].name
+
+        return merged.values
+            .map { item in
+                RecentRepo(
+                    url: item.url,
+                    name: item.url.lastPathComponent,
+                    sources: ["Cursor", "ChatGPT", "Claude"].filter { item.sources.contains($0) },
+                    lastActive: item.at,
+                    worktreeCount: linkedWorktreeCount(repo: item.url)
+                )
+            }
+            .sorted { $0.lastActive > $1.lastActive }
+    }
+
+    private nonisolated static func cursorRecentHits() -> [RecentHit] {
+        var hits: [RecentHit] = []
+        let support = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Cursor/User", isDirectory: true)
+
+        let db = support.appendingPathComponent("globalStorage/state.vscdb")
+        if FileManager.default.fileExists(atPath: db.path) {
+            let json = run("/usr/bin/sqlite3", arguments: [
+                db.path,
+                "SELECT value FROM ItemTable WHERE key = 'history.recentlyOpenedPathsList';"
+            ]).output
+            if let data = json.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let entries = object["entries"] as? [[String: Any]] {
+                let now = Date()
+                for (index, entry) in entries.enumerated() {
+                    guard let raw = entry["folderUri"] as? String,
+                          let path = filePath(fromURI: raw),
+                          FileManager.default.fileExists(atPath: path)
+                    else { continue }
+                    let at = now.addingTimeInterval(TimeInterval(-index * 3600))
+                    hits.append(RecentHit(url: URL(fileURLWithPath: path, isDirectory: true), source: "Cursor", at: at))
+                }
+            }
+        }
+
+        let storage = support.appendingPathComponent("workspaceStorage", isDirectory: true)
+        if let folders = try? FileManager.default.contentsOfDirectory(
+            at: storage,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for folder in folders {
+                let meta = folder.appendingPathComponent("workspace.json")
+                guard let data = try? Data(contentsOf: meta),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let raw = object["folder"] as? String,
+                      let path = filePath(fromURI: raw),
+                      FileManager.default.fileExists(atPath: path)
+                else { continue }
+                let modified = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                hits.append(RecentHit(url: URL(fileURLWithPath: path, isDirectory: true), source: "Cursor", at: modified))
+            }
+        }
+        return hits
+    }
+
+    private nonisolated static func filePath(fromURI raw: String) -> String? {
+        if let url = URL(string: raw), url.isFileURL {
+            return url.path
+        }
+        if raw.hasPrefix("file://") {
+            return String(raw.dropFirst("file://".count))
+        }
+        return raw
+    }
+
+    private nonisolated static func claudeRecentHits() -> [RecentHit] {
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/history.jsonl")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        var latest: [String: Date] = [:]
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let path = object["project"] as? String
+            else { continue }
+            let stamp = (object["timestamp"] as? Double).map { value -> Date in
+                Date(timeIntervalSince1970: value > 1e12 ? value / 1000 : value)
+            } ?? .distantPast
+            latest[path] = max(latest[path] ?? .distantPast, stamp)
+        }
+        return latest.compactMap { path, date in
+            guard FileManager.default.fileExists(atPath: path) else { return nil }
+            return RecentHit(url: URL(fileURLWithPath: path, isDirectory: true), source: "Claude", at: date)
+        }
+    }
+
+    private nonisolated static func codexRecentHits() -> [RecentHit] {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions", isDirectory: true)
+        let all = collectJSONL(under: root)
+        var latest: [String: Date] = [:]
+        for file in all {
+            guard let handle = try? FileHandle(forReadingFrom: file) else { continue }
+            let data = handle.readData(ofLength: 800)
+            try? handle.close()
+            guard let line = String(data: data, encoding: .utf8)?
+                .split(whereSeparator: \.isNewline).first,
+                  let payload = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any]
+            else { continue }
+            let cwd = ((object["payload"] as? [String: Any])?["cwd"] as? String) ?? (object["cwd"] as? String)
+            guard let cwd, FileManager.default.fileExists(atPath: cwd) else { continue }
+            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            latest[cwd] = max(latest[cwd] ?? .distantPast, modified)
+        }
+        return latest.map { path, date in
+            RecentHit(url: URL(fileURLWithPath: path, isDirectory: true), source: "ChatGPT", at: date)
+        }
+    }
+
+    private nonisolated static func collectJSONL(under root: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var files: [URL] = []
+        for case let file as URL in enumerator {
+            if file.pathExtension == "jsonl" {
+                files.append(file)
+            }
+            if files.count > 80 { break }
+        }
+        return files
+    }
+
+    private nonisolated static func scanWorktreesSync(repoPath: String?) -> [WorktreeItem] {
+        var records: [(record: WorktreeRecord, detail: String)] = []
+        if let repoPath, !repoPath.isEmpty {
+            let repo = URL(fileURLWithPath: repoPath, isDirectory: true).standardizedFileURL
+            for record in discoverGitWorktrees(repo: repo) {
+                records.append((record, repo.lastPathComponent))
+            }
         } else {
-            detail = "\(records.count) 个"
+            for root in worktreeRoots() {
+                let source = worktreeSourceLabel(root)
+                for record in discoverWorktrees(in: [root]) {
+                    records.append((record, source))
+                }
+            }
         }
-        return DiskItem(
-            kind: kind,
-            label: label,
-            detail: detail,
-            entries: entries,
-            selectedByDefault: selectedByDefault
-        )
+        var seen = Set<String>()
+        return records.compactMap { pair in
+            guard seen.insert(pair.record.url.path).inserted else { return nil }
+            return WorktreeItem(
+                url: pair.record.url,
+                name: pair.record.name,
+                detail: pair.record.isRecent ? "\(pair.detail) · 最近使用" : pair.detail,
+                bytes: pair.record.bytes,
+                isRecent: pair.record.isRecent
+            )
+        }
+        .sorted { $0.bytes > $1.bytes }
     }
 
-    private nonisolated static func makeNodeDependencyItem(worktrees: [WorktreeRecord]) -> DiskItem? {
+    private nonisolated static func makeNodeDependencyItem() -> DiskItem? {
         var entries: [DiskItem.Entry] = []
         var sources: [String] = []
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -505,17 +799,6 @@ final class BoostService: ObservableObject {
             entries.append(DiskItem.Entry(url: url, bytes: bytes, source: cacheLabel(for: relative)))
             let name = cacheLabel(for: relative)
             if !sources.contains(name) { sources.append(name) }
-        }
-
-        for worktree in worktrees {
-            for url in realNodeModuleDirectories(in: worktree.url) {
-                let bytes = directoryBytes(url)
-                guard bytes > 0 else { continue }
-                entries.append(DiskItem.Entry(url: url, bytes: bytes, source: "node_modules"))
-            }
-        }
-        if entries.contains(where: { $0.source == "node_modules" }), !sources.contains("node_modules") {
-            sources.append("node_modules")
         }
 
         guard !entries.isEmpty else { return nil }
@@ -541,6 +824,55 @@ final class BoostService: ObservableObject {
             let url = home.appendingPathComponent(relative, isDirectory: true)
             return isExistingDirectory(url) ? url.standardizedFileURL : nil
         }
+    }
+
+    private nonisolated static func worktreeSourceLabel(_ root: URL) -> String {
+        let path = root.path
+        if path.contains(".cursor/") { return "Cursor" }
+        if path.contains(".codex/") { return "Codex" }
+        if path.contains(".claude/") { return "Claude" }
+        return root.lastPathComponent
+    }
+
+    private nonisolated static func linkedWorktreeCount(repo: URL) -> Int {
+        let output = run("/usr/bin/git", arguments: ["-C", repo.path, "worktree", "list", "--porcelain"]).output
+        var count = 0
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard line.hasPrefix("worktree ") else { continue }
+            let path = String(line.dropFirst("worktree ".count))
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            if isLinkedWorktree(url) { count += 1 }
+        }
+        return count
+    }
+
+    private nonisolated static func discoverGitWorktrees(repo: URL) -> [WorktreeRecord] {
+        let output = run("/usr/bin/git", arguments: ["-C", repo.path, "worktree", "list", "--porcelain"]).output
+        var paths: [URL] = []
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard line.hasPrefix("worktree ") else { continue }
+            let path = String(line.dropFirst("worktree ".count))
+            paths.append(URL(fileURLWithPath: path).standardizedFileURL)
+        }
+        let now = Date()
+        return paths.compactMap { url in
+            guard isExistingDirectory(url), isLinkedWorktree(url) else { return nil }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            return WorktreeRecord(
+                url: url,
+                name: url.lastPathComponent,
+                bytes: directoryBytes(url),
+                isRecent: now.timeIntervalSince(modified) < recentWorktreeInterval
+            )
+        }
+    }
+
+    private nonisolated static func isLinkedWorktree(_ url: URL) -> Bool {
+        let git = url.appendingPathComponent(".git")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: git.path, isDirectory: &isDirectory) else { return false }
+        return !isDirectory.boolValue
     }
 
     private nonisolated static func discoverWorktrees(in roots: [URL]) -> [WorktreeRecord] {
@@ -579,25 +911,17 @@ final class BoostService: ObservableObject {
         return records.sorted { $0.bytes > $1.bytes }
     }
 
-    private nonisolated static func realNodeModuleDirectories(in worktree: URL) -> [URL] {
-        var found: [URL] = []
-        let direct = worktree.appendingPathComponent("node_modules", isDirectory: true)
-        if isExistingDirectory(direct), !isSymbolicLink(direct) {
-            found.append(direct.standardizedFileURL)
-        }
-        guard let children = try? FileManager.default.contentsOfDirectory(
-            at: worktree,
-            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles]
-        ) else { return found }
-        for child in children {
-            guard isExistingDirectory(child), !isSymbolicLink(child) else { continue }
-            let nested = child.appendingPathComponent("node_modules", isDirectory: true)
-            if isExistingDirectory(nested), !isSymbolicLink(nested) {
-                found.append(nested.standardizedFileURL)
+    private nonisolated static func reclaimWorktreesSync(_ urls: [URL]) -> Int64 {
+        var removed: Int64 = 0
+        for url in urls {
+            guard isAllowed(url, extras: urls) else { continue }
+            let bytes = directoryBytes(url)
+            if removeReclaimable(url, extras: urls) {
+                removed += bytes
+                pruneEmptyParents(of: url)
             }
         }
-        return found
+        return removed
     }
 
     private nonisolated static func reclaimSync(_ items: [DiskItem]) -> Int64 {
@@ -610,7 +934,7 @@ final class BoostService: ObservableObject {
             for entry in item.entries {
                 guard isAllowed(entry.url) else { continue }
                 let bytes = entry.bytes > 0 ? entry.bytes : directoryBytes(entry.url)
-                if removeReclaimable(entry.url) {
+                if removeReclaimable(entry.url, extras: item.entries.map(\.url)) {
                     removed += bytes
                     deletedWorktrees.append(entry.url)
                     pruneEmptyParents(of: entry.url)
@@ -626,7 +950,7 @@ final class BoostService: ObservableObject {
                 }
                 guard isExistingDirectory(entry.url), !isSymbolicLink(entry.url) else { continue }
                 let bytes = entry.bytes > 0 ? entry.bytes : directoryBytes(entry.url)
-                if removeReclaimable(entry.url) {
+                if removeReclaimable(entry.url, extras: []) {
                     removed += bytes
                 }
             }
@@ -635,9 +959,9 @@ final class BoostService: ObservableObject {
     }
 
     @discardableResult
-    private nonisolated static func removeReclaimable(_ url: URL) -> Bool {
+    private nonisolated static func removeReclaimable(_ url: URL, extras: [URL]) -> Bool {
         let standardized = url.standardizedFileURL
-        guard isAllowed(standardized) else { return false }
+        guard isAllowed(standardized, extras: extras) else { return false }
         unlinkGitWorktree(standardized)
         guard FileManager.default.fileExists(atPath: standardized.path) else { return true }
         do {
@@ -693,18 +1017,22 @@ final class BoostService: ObservableObject {
         }
     }
 
-    private nonisolated static func isAllowed(_ url: URL) -> Bool {
+    private nonisolated static func isAllowed(_ url: URL, extras: [URL] = []) -> Bool {
         let path = url.standardizedFileURL.path
         guard path.count > 16, !path.contains("\0") else { return false }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard path.hasPrefix(home + "/") else { return false }
         let worktreePrefixes = worktreeRootNames.map { home + "/" + $0 + "/" }
         if worktreePrefixes.contains(where: { path.hasPrefix($0) }) {
             return true
         }
-        return nodeCacheRelatives.contains { relative in
+        if nodeCacheRelatives.contains(where: { relative in
             let prefix = home + "/" + relative
             return path == prefix || path.hasPrefix(prefix + "/")
+        }) {
+            return true
         }
+        return extras.contains { $0.standardizedFileURL.path == path } && isLinkedWorktree(url)
     }
 
     private nonisolated static func directoryBytes(_ url: URL) -> Int64 {

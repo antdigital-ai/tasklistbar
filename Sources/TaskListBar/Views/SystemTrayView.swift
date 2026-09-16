@@ -9,7 +9,11 @@ struct SystemTrayView: View {
     @ObservedObject var volume: VolumeMonitor
     @ObservedObject var clock: ClockModel
     var isCalendarOpen: Bool = false
+    var isBoostOpen: Bool = false
+    var isWorktreeOpen: Bool = false
     var onToggleCalendar: (() -> Void)?
+    var onToggleBoost: (() -> Void)?
+    var onToggleWorktree: (() -> Void)?
     var onShowDesktop: (() -> Void)?
     @Environment(\.taskbarSize) private var size
 
@@ -19,7 +23,8 @@ struct SystemTrayView: View {
                 BatteryTrayButton(status: battery.status)
             }
 
-            BoostTrayButton(boost: boost)
+            BoostTrayButton(boost: boost, isOpen: isBoostOpen, onToggle: { onToggleBoost?() })
+            WorktreeTrayButton(boost: boost, isOpen: isWorktreeOpen, onToggle: { onToggleWorktree?() })
 
             SpacesTrayButton(space: spaces.currentSpace, count: spaces.spaceCount) {
                 spaces.openMissionControl()
@@ -44,7 +49,7 @@ struct SystemTrayView: View {
 
 /// Shared macOS-style chrome for every compact tray symbol. SF Symbols handles
 /// optical sizing; the fixed hit target keeps baselines and hover shapes aligned.
-private struct TraySymbol: View {
+struct TraySymbol: View {
     let name: String
     var color: Color = .primary.opacity(0.86)
     var isHighlighted = false
@@ -162,18 +167,12 @@ struct BatteryTrayButton: View {
 
 struct BoostTrayButton: View {
     @ObservedObject var boost: BoostService
+    var isOpen = false
+    var onToggle: (() -> Void)?
     @Environment(\.taskbarAccent) private var accent
     @State private var hovering = false
-    @State private var showingFlyout = false
     @State private var justCleaned = false
     @State private var cleanFlashTask: Task<Void, Never>?
-
-    private var helpText: String {
-        if boost.pressure.isHigh {
-            return "AI 占用偏高 · CPU \(boost.pressure.cpuPercent)% · 内存 \(boost.pressure.rssMB)MB（点击清理）"
-        }
-        return "加速：关闭编译 / AI 进程，并清理 Worktree 与 Node 依赖"
-    }
 
     private var iconColor: Color {
         if justCleaned { return accent.color }
@@ -183,13 +182,12 @@ struct BoostTrayButton: View {
 
     var body: some View {
         Button {
-            NSApp.activate(ignoringOtherApps: true)
-            showingFlyout.toggle()
+            onToggle?()
         } label: {
             TraySymbol(
                 name: boost.pressure.isHigh ? "bolt.fill" : "bolt",
                 color: iconColor,
-                isHighlighted: showingFlyout || hovering,
+                isHighlighted: isOpen || hovering,
                 weight: .medium
             )
         }
@@ -199,14 +197,8 @@ struct BoostTrayButton: View {
                 self.hovering = hovering
             }
         }
-        .help(helpText)
-        .popover(isPresented: $showingFlyout, arrowEdge: .top) {
-            BoostFlyout(boost: boost) {
-                showingFlyout = false
-            }
-        }
         .onChange(of: boost.snapshot.generation) { _ in
-            guard boost.snapshot.generation > 0 else { return }
+            guard boost.snapshot.kind == .boost else { return }
             flashCleaned()
         }
     }
@@ -218,255 +210,6 @@ struct BoostTrayButton: View {
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard !Task.isCancelled else { return }
             justCleaned = false
-        }
-    }
-}
-
-struct BoostFlyout: View {
-    @ObservedObject var boost: BoostService
-    let onClose: () -> Void
-    @Environment(\.taskbarAccent) private var accent
-    @State private var groups: [BoostService.ProcessGroup] = []
-    @State private var disks: [BoostService.DiskItem] = []
-    @State private var selected: Set<String> = []
-    @State private var didScan = false
-    @State private var didScanDisk = false
-
-    private var selectedCount: Int {
-        groups.filter { selected.contains($0.label) }.reduce(0) { $0 + $1.count }
-    }
-
-    private var selectedBytes: Int64 {
-        let chosen = disks.filter { selected.contains($0.id) }
-        let worktreePaths = chosen
-            .filter { $0.kind != .nodeDependencies }
-            .flatMap { $0.entries.map(\.url.path) }
-        var total: Int64 = 0
-        for item in chosen {
-            if item.kind == .nodeDependencies {
-                for entry in item.entries where !worktreePaths.contains(where: { entry.url.path.hasPrefix($0 + "/") }) {
-                    total += entry.bytes
-                }
-            } else {
-                total += item.bytes
-            }
-        }
-        return total
-    }
-
-    private var canClean: Bool {
-        !boost.isRunning && (
-            selectedCount > 0 || disks.contains { selected.contains($0.id) }
-        )
-    }
-
-    private var listHeight: CGFloat {
-        let processBlock: CGFloat = groups.isEmpty ? 0 : 22 + CGFloat(groups.count) * 30
-        let diskBlock: CGFloat
-        if !disks.isEmpty {
-            diskBlock = 22 + CGFloat(disks.count) * 38
-        } else if !didScanDisk {
-            diskBlock = 28
-        } else {
-            diskBlock = 0
-        }
-        let spacing: CGFloat = (processBlock > 0 && diskBlock > 0) ? 14 : 0
-        return min(560, max(420, processBlock + diskBlock + spacing))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text("加速清理")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer(minLength: 8)
-                Button {
-                    reload(force: true)
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(0.75))
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.9))
-                .help("重新扫描")
-            }
-
-            if !didScan {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("扫描中…")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-            } else if groups.isEmpty && disks.isEmpty && didScanDisk {
-                Text("没有发现可清理的进程或文件")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if !groups.isEmpty {
-                            flyoutSection("进程") {
-                                ForEach(groups) { group in
-                                    cleanupRow(
-                                        title: group.label,
-                                        accessory: "\(group.count)",
-                                        isOn: binding(for: group.label)
-                                    )
-                                }
-                            }
-                        }
-                        if !disks.isEmpty {
-                            flyoutSection("磁盘") {
-                                ForEach(disks) { item in
-                                    cleanupRow(
-                                        title: item.label,
-                                        subtitle: item.detail,
-                                        accessory: BoostService.formatBytes(item.bytes),
-                                        isOn: binding(for: item.id)
-                                    )
-                                }
-                            }
-                        } else if !didScanDisk {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("正在计算磁盘占用…")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 4)
-                        }
-                    }
-                }
-                .frame(height: listHeight, alignment: .top)
-            }
-
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 2) {
-                    if selectedCount > 0 {
-                        Text("\(selectedCount) 个进程")
-                    }
-                    if selectedBytes > 0 {
-                        Text("可回收 \(BoostService.formatBytes(selectedBytes))")
-                    }
-                    if selectedCount == 0 && selectedBytes == 0 {
-                        Text("未选择")
-                    }
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                Spacer(minLength: 8)
-                Button {
-                    let chosenGroups = groups.filter { selected.contains($0.label) }
-                    let chosenDisks = disks.filter { selected.contains($0.id) }
-                    boost.boost(groups: chosenGroups, disks: chosenDisks)
-                    onClose()
-                } label: {
-                    Text("清理选中")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 5)
-                        .background(
-                            Capsule().fill(accent.color.opacity(canClean ? 1 : 0.4))
-                        )
-                }
-                .buttonStyle(PressableScaleButtonStyle(pressedScale: 0.94))
-                .disabled(!canClean)
-            }
-        }
-        .padding(14)
-        .frame(width: 320, alignment: .top)
-        .background(PopoverKeyGrabber())
-        .onAppear { reload(force: false) }
-    }
-
-    private func flyoutSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.primary.opacity(0.42))
-                .padding(.horizontal, 4)
-            VStack(alignment: .leading, spacing: 2) {
-                content()
-            }
-        }
-    }
-
-    private func cleanupRow(title: String, subtitle: String? = nil, accessory: String, isOn: Binding<Bool>) -> some View {
-        Toggle(isOn: isOn) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
-                        .font(.system(size: 12))
-                    if let subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer(minLength: 8)
-                Text(accessory)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            .contentShape(Rectangle())
-        }
-        .toggleStyle(.checkbox)
-        .padding(.horizontal, 4)
-        .padding(.vertical, 4)
-    }
-
-    private func binding(for label: String) -> Binding<Bool> {
-        Binding(
-            get: { selected.contains(label) },
-            set: { on in
-                if on {
-                    selected.insert(label)
-                } else {
-                    selected.remove(label)
-                }
-            }
-        )
-    }
-
-    private func reload(force: Bool = false) {
-        let hasProcessCache = !boost.lastGroups.isEmpty
-        let hasDiskCache = boost.disksCached
-        if force || !hasProcessCache {
-            didScan = false
-        }
-        if force || !hasDiskCache {
-            didScanDisk = false
-            if force { disks = [] }
-        } else {
-            disks = boost.lastDisks
-            didScanDisk = true
-        }
-        if hasProcessCache && !force {
-            groups = boost.lastGroups
-            selected = Set(groups.map(\.label) + disks.filter(\.selectedByDefault).map(\.id))
-            didScan = true
-        }
-        Task { @MainActor in
-            async let processScan = boost.scan(force: force)
-            async let diskScan = boost.scanDisk(force: force)
-            let processResult = await processScan
-            groups = processResult
-            selected = Set(processResult.map(\.label))
-            didScan = true
-            let diskResult = await diskScan
-            disks = diskResult
-            selected.formUnion(diskResult.filter(\.selectedByDefault).map(\.id))
-            didScanDisk = true
         }
     }
 }
@@ -821,7 +564,7 @@ private struct VolumeSlider: NSViewRepresentable {
 }
 
 /// Makes a SwiftUI popover the key window so it is selected as soon as it opens.
-private struct PopoverKeyGrabber: NSViewRepresentable {
+struct PopoverKeyGrabber: NSViewRepresentable {
     var preferSlider = false
 
     func makeNSView(context: Context) -> KeyGrabberView {
@@ -835,7 +578,7 @@ private struct PopoverKeyGrabber: NSViewRepresentable {
     }
 }
 
-private final class KeyGrabberView: NSView {
+final class KeyGrabberView: NSView {
     var preferSlider = false
     private var didGrab = false
 

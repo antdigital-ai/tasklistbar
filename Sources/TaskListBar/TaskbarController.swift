@@ -14,6 +14,8 @@ final class TaskbarController: NSObject {
     private var calendarPanel: NSPanel?
     private var settingsPanel: NSPanel?
     private var permissionsPanel: NSPanel?
+    private var boostPanel: NSPanel?
+    private var worktreePanel: NSPanel?
     private var windowListPanel: NSPanel?
     private var statusItem: NSStatusItem?
     private var screenObserver: NSObjectProtocol?
@@ -115,6 +117,20 @@ final class TaskbarController: NSObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.syncWindowListVisibility()
+            }
+            .store(in: &cancellables)
+
+        viewModel.$isBoostOpen
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncBoostVisibility()
+            }
+            .store(in: &cancellables)
+
+        viewModel.$isWorktreeOpen
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.syncWorktreeVisibility()
             }
             .store(in: &cancellables)
     }
@@ -503,6 +519,74 @@ final class TaskbarController: NSObject {
         permissionsPanel = panel
     }
 
+    private func createBoostPanelIfNeeded() {
+        if boostPanel != nil { return }
+
+        let content = SolidWindowFactory.wrap(
+            BoostFlyout(boost: viewModel.boostService) { [weak self] in
+                self?.viewModel.closeBoostCleanup()
+            }
+            .environment(\.taskbarAccent, viewModel.appSettings.accent)
+            .environment(\.taskbarSize, viewModel.appSettings.barSize)
+            .preferredColorScheme(.light),
+            cornerRadius: BoostFlyout.Metrics.corner
+        )
+
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: BoostFlyout.Metrics.width, height: BoostFlyout.Metrics.height),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.appearance = NSAppearance(named: .aqua)
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.isMovableByWindowBackground = true
+        panel.contentView = content
+
+        boostPanel = panel
+    }
+
+    private func createWorktreePanelIfNeeded() {
+        if worktreePanel != nil { return }
+
+        let content = SolidWindowFactory.wrap(
+            WorktreeFlyout(boost: viewModel.boostService) { [weak self] in
+                self?.viewModel.closeWorktreeCleanup()
+            }
+            .environment(\.taskbarAccent, viewModel.appSettings.accent)
+            .environment(\.taskbarSize, viewModel.appSettings.barSize)
+            .preferredColorScheme(.light),
+            cornerRadius: WorktreeFlyout.Metrics.corner
+        )
+
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: WorktreeFlyout.Metrics.width, height: WorktreeFlyout.Metrics.height),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.appearance = NSAppearance(named: .aqua)
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.isMovableByWindowBackground = true
+        panel.contentView = content
+
+        worktreePanel = panel
+    }
+
     private func createWindowListPanelIfNeeded() {
         if windowListPanel != nil { return }
 
@@ -633,6 +717,12 @@ final class TaskbarController: NSObject {
         if let permissions = permissionsPanel {
             apply(permissions, permissionsTargetFrame())
         }
+        if let boost = boostPanel {
+            apply(boost, boostTargetFrame())
+        }
+        if let worktree = worktreePanel {
+            apply(worktree, worktreeTargetFrame())
+        }
         if let list = windowListPanel {
             apply(list, windowListTargetFrame())
         }
@@ -657,6 +747,8 @@ final class TaskbarController: NSObject {
             hideOverlayImmediately(settingsPanel)
             hideOverlayImmediately(permissionsPanel)
             hideOverlayImmediately(startMenuPanel)
+            hideOverlayImmediately(boostPanel)
+            hideOverlayImmediately(worktreePanel)
             createModifierKeysPanelIfNeeded()
             ignoreOutsideClick()
             animatePanel(
@@ -725,11 +817,57 @@ final class TaskbarController: NSObject {
         }
     }
 
+    private func syncBoostVisibility() {
+        if viewModel.isBoostOpen {
+            hideOverlayImmediately(worktreePanel)
+            createBoostPanelIfNeeded()
+            animatePanel(
+                boostPanel,
+                show: true,
+                target: boostTargetFrame()
+            ) { [weak self] in
+                guard let self, self.viewModel.isBoostOpen else { return }
+                self.boostPanel?.makeKeyAndOrderFront(nil)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            animatePanel(
+                boostPanel,
+                show: false,
+                target: boostTargetFrame()
+            )
+        }
+    }
+
+    private func syncWorktreeVisibility() {
+        if viewModel.isWorktreeOpen {
+            hideOverlayImmediately(boostPanel)
+            createWorktreePanelIfNeeded()
+            animatePanel(
+                worktreePanel,
+                show: true,
+                target: worktreeTargetFrame()
+            ) { [weak self] in
+                guard let self, self.viewModel.isWorktreeOpen else { return }
+                self.worktreePanel?.makeKeyAndOrderFront(nil)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            animatePanel(
+                worktreePanel,
+                show: false,
+                target: worktreeTargetFrame()
+            )
+        }
+    }
+
     private func syncPermissionsVisibility() {
         if viewModel.isPermissionsOpen {
             hideOverlayImmediately(settingsPanel)
             hideOverlayImmediately(startMenuPanel)
             hideOverlayImmediately(modifierKeysPanel)
+            hideOverlayImmediately(boostPanel)
+            hideOverlayImmediately(worktreePanel)
             createPermissionsPanelIfNeeded()
             ignoreOutsideClick()
             animatePanel(
@@ -1136,6 +1274,25 @@ final class TaskbarController: NSObject {
         )
     }
 
+    private func boostTargetFrame() -> NSRect {
+        cleanupTargetFrame(width: BoostFlyout.Metrics.width, height: BoostFlyout.Metrics.height)
+    }
+
+    private func worktreeTargetFrame() -> NSRect {
+        cleanupTargetFrame(width: WorktreeFlyout.Metrics.width, height: WorktreeFlyout.Metrics.height)
+    }
+
+    private func cleanupTargetFrame(width: CGFloat, height: CGFloat) -> NSRect {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
+        let frame = screen.frame
+        return NSRect(
+            x: frame.midX - width / 2,
+            y: frame.minY + Self.barHeight + 28,
+            width: width,
+            height: height
+        )
+    }
+
     private func permissionsTargetFrame() -> NSRect {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return .zero }
         let frame = screen.frame
@@ -1430,6 +1587,7 @@ final class TaskbarController: NSObject {
 
     private func handleMouseDown() {
         guard viewModel.hasOpenOverlay, !suppressOutsideClose else { return }
+        if NSApp.modalWindow != nil { return }
         let location = NSEvent.mouseLocation
         let inBar = panel?.frame.contains(location) == true
 
@@ -1465,6 +1623,20 @@ final class TaskbarController: NSObject {
             let inPermissions = permissionsPanel?.frame.contains(location) == true
             if !inPermissions && !inBar {
                 viewModel.closePermissions()
+            }
+        }
+
+        if viewModel.isBoostOpen {
+            let inBoost = boostPanel?.frame.contains(location) == true
+            if !inBoost && !inBar {
+                viewModel.closeBoostCleanup()
+            }
+        }
+
+        if viewModel.isWorktreeOpen {
+            let inWorktree = worktreePanel?.frame.contains(location) == true
+            if !inWorktree && !inBar {
+                viewModel.closeWorktreeCleanup()
             }
         }
 
